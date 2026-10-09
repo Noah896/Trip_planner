@@ -9,7 +9,7 @@ from datetime import date
 
 class TripRequest(BaseModel):
     """旅行规划请求"""
-    city: str = Field(..., description="目的地城市", examples=["北京"])
+    city: str = Field(..., min_length=1, description="目的地城市", examples=["北京"])
     start_date: date = Field(..., description="开始日期 YYYY-MM-DD", examples=["2025-06-01"])
     end_date: date = Field(..., description="结束日期 YYYY-MM-DD", examples=["2025-06-03"])
     travel_days: int = Field(..., description="旅行天数", ge=1, le=30, examples=[3])
@@ -178,6 +178,13 @@ class TripPlan(BaseModel):
 class TripPlanResponse(BaseModel):
     """旅行计划响应"""
     success: bool = Field(..., description="是否成功")
+    degraded: bool = Field(
+        default=False,
+        description=(
+            "是否为降级结果。True 表示 AI 规划未成功,返回的是占位行程"
+            "(景点/餐饮为占位内容),前端应提示用户不要直接采用"
+        ),
+    )
     message: str = Field(default="", description="消息")
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
 

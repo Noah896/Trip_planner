@@ -35,6 +35,16 @@
       </a-space>
     </div>
 
+    <!-- 降级结果提示:后端标记 degraded=True 时,这份行程是占位内容 -->
+    <div v-if="tripPlan && degraded" class="degraded-alert-wrapper">
+      <a-alert
+        type="warning"
+        show-icon
+        message="这份行程是占位结果,不建议直接采用"
+        description="AI 规划这次没有成功(景点与餐饮名称为占位符)。可以返回首页重新生成,或检查后端日志与 API Key 配额。"
+      />
+    </div>
+
     <div v-if="tripPlan" class="content-wrapper">
       <!-- 侧边导航 -->
       <div class="side-nav">
@@ -319,6 +329,8 @@ import type { TripPlan } from '@/types'
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
+// 后端标记的降级结果(占位行程),用于在页面顶部提示
+const degraded = ref(false)
 const editMode = ref(false)
 const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
@@ -330,6 +342,7 @@ onMounted(async () => {
   const data = sessionStorage.getItem('tripPlan')
   if (data) {
     tripPlan.value = JSON.parse(data)
+    degraded.value = sessionStorage.getItem('tripPlanDegraded') === '1'
     // 加载景点图片
     await loadAttractionPhotos()
     // 等待DOM渲染完成后初始化地图
@@ -940,6 +953,12 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   margin: 0 auto;
   display: flex;
   gap: 24px;
+}
+
+.degraded-alert-wrapper {
+  max-width: 1400px;
+  margin: 0 auto 20px;
+  animation: fadeInDown 0.6s ease-out;
 }
 
 .side-nav {

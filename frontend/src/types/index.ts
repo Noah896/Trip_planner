@@ -89,6 +89,8 @@ export interface TripFormData {
 
 export interface TripPlanResponse {
   success: boolean
+  // 为 true 时表示后端返回的是兜底占位行程(AI 规划未成功)
+  degraded?: boolean
   message: string
   data?: TripPlan
 }

@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     app_name: str = "智能旅行规划助手"
     app_version: str = "1.0.0"
     debug: bool = False
+    # 运行环境:development / production。决定是否开启热重载与调试日志。
+    app_env: str = "development"
 
     # 服务器配置
     host: str = "0.0.0.0"
@@ -64,6 +66,11 @@ class Settings(BaseSettings):
     def get_cors_origins_list(self) -> List[str]:
         """获取CORS origins列表"""
         return [origin.strip() for origin in self.cors_origins.split(',')]
+
+    @property
+    def is_development(self) -> bool:
+        """是否运行在开发环境(决定 uvicorn 是否开启 reload)。"""
+        return self.app_env.strip().lower() in {"dev", "development", "local"}
 
     def resolve_llm_credentials(self) -> tuple:
         """解析 LLM 凭据

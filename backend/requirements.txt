@@ -1,33 +1,37 @@
+# 依赖已按当前验证通过的版本锁定(2026-10-09,Python 3.13)。
+# 升级依赖时请同步跑一遍 `pytest`(见 backend/tests)和一次真实 /api/trip/plan。
+
 # LangChain 框架
-langchain>=1.0
-langchain-openai>=1.0
-langgraph>=1.0
-langchain-mcp-adapters>=0.3
+langchain==1.4.2
+langchain-openai==1.6.6
+langgraph==1.2.12
+langchain-mcp-adapters==0.3.2
 
 # FastAPI和相关依赖
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+pydantic==2.13.4
+pydantic-settings==2.15.0
 
 # HTTP客户端
-httpx>=0.27.0
-aiohttp>=3.10.0
+httpx==0.28.1
+aiohttp==3.14.3
 
 # 环境变量管理
-python-dotenv>=1.0.0
+python-dotenv==1.2.2
 
 # CORS支持
-python-multipart>=0.0.9
+python-multipart==0.0.32
 
 # 日志
-loguru>=0.7.0
+loguru==0.7.3
 
 # MCP相关
-# 注意:不再需要 fastmcp(它与 langchain-mcp-adapters 依赖的 mcp>=1.24 冲突)
-mcp>=1.24.0
-uv>=0.8.0
+# 注意:不再需要 fastmcp(它与 langchain-mcp-adapters 依赖的 mcp>=1.24 冲突)。
+# uv 提供 uvx,高德 MCP Server 通过 `uvx amap-mcp-server` 拉起。
+mcp==1.30.0
+uv==0.12.18
 
 # 其他工具
-python-dateutil>=2.8.2
-huggingface_hub>=0.25.0
+python-dateutil==2.9.0.post0
+huggingface-hub==0.36.2

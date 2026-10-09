@@ -295,10 +295,15 @@ const handleSubmit = async () => {
     loadingStatus.value = '✅ 完成!'
 
     if (response.success && response.data) {
-      // 保存到sessionStorage
+      // 保存到sessionStorage(degraded 单独存一份,结果页要用来显示提示)
       sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
+      sessionStorage.setItem('tripPlanDegraded', response.degraded ? '1' : '0')
 
-      message.success('旅行计划生成成功!')
+      if (response.degraded) {
+        message.warning(response.message || 'AI 规划未完成,已返回占位行程,仅供参考')
+      } else {
+        message.success('旅行计划生成成功!')
+      }
 
       // 短暂延迟后跳转
       setTimeout(() => {

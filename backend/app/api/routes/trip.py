@@ -38,14 +38,22 @@ async def plan_trip(request: TripRequest):
 
         # 生成旅行计划
         print("🚀 开始生成旅行计划...")
-        trip_plan = await agent.plan_trip(request)
+        outcome = await agent.plan_trip_with_status(request)
 
-        print("✅ 旅行计划生成成功,准备返回响应\n")
+        if outcome.degraded:
+            print(f"⚠️  返回降级占位行程: {outcome.reason}\n")
+        else:
+            print("✅ 旅行计划生成成功,准备返回响应\n")
 
         return TripPlanResponse(
             success=True,
-            message="旅行计划生成成功",
-            data=trip_plan,
+            degraded=outcome.degraded,
+            message=(
+                "AI 规划未完成,已返回占位行程(仅供参考,请稍后重试)"
+                if outcome.degraded
+                else "旅行计划生成成功"
+            ),
+            data=outcome.plan,
         )
 
     except Exception as e:

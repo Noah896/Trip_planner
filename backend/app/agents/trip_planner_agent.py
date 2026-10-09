@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -161,6 +162,25 @@ class TripPlanningState(TypedDict, total=False):
     weather_result: str
     hotel_result: str
     plan: Optional[TripPlan]
+
+
+@dataclass
+class PlanOutcome:
+    """一次规划的完整结果(含"是否降级"标记)。
+
+    对外接口 :meth:`MultiAgentTripPlanner.plan_trip` 仍然只返回 ``TripPlan``
+    (保持旧契约);需要区分"真实规划"与"兜底占位行程"的调用方(HTTP 路由、
+    测试)请改用 :meth:`plan_trip_with_status`。
+
+    Attributes:
+        plan: 行程数据。``degraded=True`` 时是占位内容。
+        degraded: 是否走了兜底路径。
+        reason: 降级原因(便于日志与前端提示)。
+    """
+
+    plan: TripPlan
+    degraded: bool = False
+    reason: str = ""
 
 
 def _last_message_text(result: Dict[str, Any]) -> str:
@@ -343,8 +363,12 @@ class MultiAgentTripPlanner:
 
     async def _run_structured_planner(
         self, query: str, request: TripRequest
-    ) -> TripPlan:
-        """优先使用结构化输出,失败则退回文本 + JSON 解析。"""
+    ) -> Optional[TripPlan]:
+        """优先使用结构化输出,失败则退回文本 + JSON 解析。
+
+        解析不出来时返回 ``None``(而不是就地造一份兜底行程),
+        这样"是否降级"的判断统一收敛到 :meth:`plan_trip_with_status`。
+        """
         try:
             result = await self.planner_agent.ainvoke(
                 {"messages": [{"role": "user", "content": query}]}
@@ -363,13 +387,29 @@ class MultiAgentTripPlanner:
     # ---------- 对外接口 ----------
 
     async def plan_trip(self, request: TripRequest) -> TripPlan:
-        """使用多智能体协作生成旅行计划
+        """使用多智能体协作生成旅行计划(兼容旧契约,只返回 TripPlan)
 
         Args:
             request: 旅行请求
 
         Returns:
-            旅行计划(失败时返回备用方案)
+            旅行计划。**失败时返回的是占位行程**,调用方若需要区分,
+            请改用 :meth:`plan_trip_with_status`。
+        """
+        outcome = await self.plan_trip_with_status(request)
+        return outcome.plan
+
+    async def plan_trip_with_status(self, request: TripRequest) -> PlanOutcome:
+        """使用多智能体协作生成旅行计划,并返回降级标记
+
+        与 ``plan_trip`` 的区别只在于返回值:这里会显式告诉调用方
+        结果是不是兜底占位行程,避免把 "AI 失败" 当成 "规划成功" 返回。
+
+        Args:
+            request: 旅行请求
+
+        Returns:
+            :class:`PlanOutcome`,其中 ``degraded=True`` 表示走了兜底路径。
         """
         try:
             print(f"\n{'=' * 60}")
@@ -390,22 +430,30 @@ class MultiAgentTripPlanner:
                 final_state.get("hotel_result"),
             )
             if not any(results):
-                print("⚠️  三路检索均无结果,使用备用方案")
-                return self._create_fallback_plan(request)
+                return self._degrade(request, "三路检索均无结果")
 
             plan = final_state.get("plan")
             if not isinstance(plan, TripPlan):
-                return self._create_fallback_plan(request)
+                return self._degrade(request, "规划 Agent 未返回可用的结构化行程")
 
             print(f"{'=' * 60}")
             print("✅ 旅行计划生成完成!")
             print(f"{'=' * 60}\n")
-            return plan
+            return PlanOutcome(plan=plan)
 
         except Exception as exc:
             print(f"❌ 生成旅行计划失败: {exc}")
             traceback.print_exc()
-            return self._create_fallback_plan(request)
+            return self._degrade(request, f"规划过程出错: {exc}")
+
+    def _degrade(self, request: TripRequest, reason: str) -> PlanOutcome:
+        """返回兜底占位行程,并显式标记为降级结果。"""
+        print(f"⚠️  使用兜底占位行程({reason})")
+        return PlanOutcome(
+            plan=self._create_fallback_plan(request),
+            degraded=True,
+            reason=reason,
+        )
 
     # ---------- 查询构建 ----------
 
@@ -456,24 +504,30 @@ class MultiAgentTripPlanner:
 
     # ---------- 结果解析与兜底 ----------
 
-    def _parse_response(self, response: str, request: TripRequest) -> TripPlan:
+    def _parse_response(self, response: str, request: TripRequest) -> Optional[TripPlan]:
         """解析 Agent 响应中的 JSON 为 TripPlan。
 
-        这是结构化输出不可用时的兜底路径。
+        这是结构化输出不可用时的兜底路径;解析失败返回 ``None``,
+        由调用方决定是否降级为占位行程。
         """
         data = extract_json(response)
         if not isinstance(data, dict):
-            print("⚠️  响应中未找到 JSON 数据,将使用备用方案")
-            return self._create_fallback_plan(request)
+            print("⚠️  响应中未找到 JSON 数据")
+            return None
 
         try:
             return TripPlan(**data)
         except Exception as exc:
             print(f"⚠️  解析响应失败: {exc}")
-            return self._create_fallback_plan(request)
+            return None
 
     def _create_fallback_plan(self, request: TripRequest) -> TripPlan:
-        """创建备用计划(当 Agent 失败时)"""
+        """创建占位行程(当 Agent 失败时)
+
+        注意:这里生成的是**占位内容**(景点名形如 "北京景点1"),
+        只用于让前端仍能渲染出页面结构,不代表真实的行程规划结果。
+        对外会通过 ``TripPlanResponse.degraded=True`` 明确标记。
+        """
         start_date = _as_datetime(request.start_date)
         end_date = _as_datetime(request.end_date)
 
@@ -516,6 +570,8 @@ class MultiAgentTripPlanner:
             days=days,
             weather_info=[],
             overall_suggestions=(
+                f"⚠️ 本次 AI 规划未成功,以下为占位行程(景点与餐饮名称均为占位符),"
+                f"请勿直接采用,建议稍后重试。\n"
                 f"这是为您规划的{request.city}{request.travel_days}日游行程,"
                 f"建议提前查看各景点的开放时间。"
             ),

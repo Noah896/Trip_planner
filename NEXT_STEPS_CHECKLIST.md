@@ -9,16 +9,17 @@
 
 ## P0 · 让项目"立起来"(成本最低、回报最高,建议先做)
 
-- [ ] 🟥 `git init`,把 `backend/venv/`、`backend/.env`、`frontend/node_modules/`、`frontend/.env` 写进 `.gitignore`,做第一次提交(现在整个目录没有版本控制)。
+- [x] 🟥 `git init`,把 `backend/venv/`、`backend/.env`、`frontend/node_modules/`、`frontend/.env` 写进 `.gitignore`,做第一次提交(2026-10-09)。
 - [ ] 🟥 轮换已经暴露的密钥(ModelScope / 高德 / Unsplash),把 `.env` 从版本控制中移除。
-- [ ] 🟥 提供 `backend/.env.example` 和 `frontend/.env.example`,只留键名和注释。
-- [ ] 🟥 写 `README.md`:环境要求、必填配置、前后端启动命令、一条 `curl` 示例、常见问题。
-- [ ] 🟥 锁定依赖:后端固定 `requirements.txt` 版本(或加 `constraints.txt`),前端已锁定 `package-lock.json` 保持提交。
-- [ ] 🟥 一键启动脚本(`scripts/dev.ps1` 或 `Makefile`):同时拉起后端 + 前端。
-- [ ] 🟥 最小测试集:
-  - [ ] `backend` 单测:`extract_json` / `parse_mcp_payload`、`_parse_weather`、`_parse_pois`。
-  - [ ] `backend` 冒烟:`TestClient` 打桩 LLM,验证 `GET /health`、`GET /api/trip/health`、`POST /api/trip/plan` 返回结构。
-  - [ ] `frontend`:`npm run build`(`vue-tsc`)作为最低门槛的 CI 检查。
+      → `.env` 从未进过版本库,无需清理;但**密钥轮换需要你手动去各控制台做**。
+- [x] 🟥 提供 `backend/.env.example` 和 `frontend/.env.example`,只留键名和注释。
+- [x] 🟥 写 `README.md`:环境要求、必填配置、前后端启动命令、一条 `curl` 示例、常见问题。
+- [x] 🟥 锁定依赖:后端 `requirements.txt` 已按验证版本固定(`==`),前端保持提交 `package-lock.json`。
+- [x] 🟥 一键启动脚本 `scripts/dev.ps1`:自动挑 Python、缺 `node_modules` 时自动 `npm install`、Ctrl+C 统一停子进程。
+- [x] 🟥 最小测试集(共 50 个用例,离线可跑):
+  - [x] `backend` 单测:`extract_json` / `parse_mcp_payload`、`_parse_weather`、`_parse_pois`、`_normalize_route`。
+  - [x] `backend` 冒烟:`TestClient` 打桩 Agent,验证 `GET /health`、`GET /api/trip/health`、`POST /api/trip/plan` 返回结构、422 校验、500 分支。
+  - [x] `frontend`:`npm run build`(`vue-tsc`)已验证通过,可作为最低门槛的 CI 检查(CI 本身尚未接入)。
 
 **P0 完成定义:** 一个新人在干净机器上,照 README 五步内能把项目跑起来;`git status` 干净;密钥不在库里。
 
@@ -27,9 +28,10 @@
 ## P1 · 能部署、能稳定运行
 
 - [ ] 🟨 Docker 化:`backend/Dockerfile`、`frontend/Dockerfile` + `docker-compose.yml`(含前后端;高德 MCP 依赖的 `uvx` 要装进镜像)。
-- [ ] 🟨 关掉生产环境的 `run.py` 里 `reload=True`,用环境区分 dev / prod 配置。
+- [x] 🟨 关掉生产环境的 `run.py` 里 `reload=True`,用环境区分 dev / prod 配置(新增 `APP_ENV`;`production` 时关闭热重载)。
 - [ ] 🟨 结构化日志:把散落的 `print` + emoji 换成 `loguru`(已在依赖中),补 request id、耗时、降级标记。
-- [ ] 🟨 **修掉"假数据当成功"**:`_create_fallback_plan` 会返回 `"{城市}景点1"` 这类占位内容却仍 `success=True`;应显式标记 `degraded=True` 或直接返回失败。
+- [x] 🟨 **修掉"假数据当成功"**:`_create_fallback_plan` 会返回 `"{城市}景点1"` 这类占位内容却仍 `success=True`;应显式标记 `degraded=True` 或直接返回失败。
+      → 响应新增 `degraded` 字段,占位行程为 `true`;正文与前端均有明确提示,且 `plan_trip(request) -> TripPlan` 旧契约保持不变。
 - [ ] 🟨 健康检查校验真实依赖:现在 `/api/map/health` 只看 key 是否存在,应实际 ping 一次 MCP / LLM。
 - [ ] 🟨 限流 + 并发背压 + 超时:一个 `/plan` 请求会触发 4 次大模型 + 多次 `uvx`;加 `Semaphore` / 队列,避免被刷爆。
 - [ ] 🟨 成本护栏:按调用量 / token 计费统计,设单用户日配额。

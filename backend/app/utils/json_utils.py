@@ -16,7 +16,11 @@ def extract_json(text: str) -> Optional[Any]:
     依次尝试:
     1. Markdown 代码块(```json ... ```)中的内容
     2. 全文
-    3. 全文里第一个 ``{...}`` / ``[...]`` 片段
+    3. 全文里第一个能真正解析成功的 ``{...}`` / ``[...]`` 片段
+
+    第 3 步用 ``JSONDecoder.raw_decode`` 逐个起点尝试,而不是简单地把
+    "第一个左括号到最后一个右括号"整段切出来 —— 模型有时会连着输出
+    两个 JSON 对象(如 ``{"a": 1}\\n{"b": 2}``),整段切片会解析失败。
 
     Args:
         text: 原始文本
@@ -37,18 +41,23 @@ def extract_json(text: str) -> Optional[Any]:
     stripped = text.strip()
     candidates.append(stripped)
 
-    # 3. 括号切片
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start, end = stripped.find(opener), stripped.rfind(closer)
-        if 0 <= start < end:
-            candidates.append(stripped[start : end + 1])
-
     for candidate in candidates:
         if not candidate:
             continue
         try:
             return json.loads(candidate)
         except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+
+    # 3. 从每个括号起点尝试解析,取第一个成功的片段
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(stripped):
+        if char not in "{[":
+            continue
+        try:
+            value, _ = decoder.raw_decode(stripped[index:])
+            return value
+        except (json.JSONDecodeError, ValueError):
             continue
 
     return None
@@ -77,4 +86,3 @@ def parse_mcp_payload(text: str) -> Optional[Any]:
 def json_dumps(data: Any) -> str:
     """以 UTF-8 友好方式序列化 JSON(用于回填到提示词)。"""
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
-
