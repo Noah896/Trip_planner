@@ -1,0 +1,27 @@
+# ---- 环境变量:只提交 .env.example ----
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- Node ----
+node_modules/
+dist/
+dist-ssr/
+
+# ---- 日志 / IDE / 系统 ----
+logs/
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
