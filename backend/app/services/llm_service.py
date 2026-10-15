@@ -41,11 +41,13 @@ def get_llm() -> ChatOpenAI:
             base_url=base_url or None,
             temperature=settings.llm_temperature,
             timeout=settings.llm_timeout,
+            extra_body={"enable_thinking": settings.llm_enable_thinking},
         )
 
         print("✅ LLM 服务初始化成功 (LangChain ChatOpenAI)")
         print(f"   模型: {model}")
         print(f"   服务地址: {base_url}")
+        print(f"   thinking 模式: {'开启' if settings.llm_enable_thinking else '关闭'}")
 
     return _llm_instance
 

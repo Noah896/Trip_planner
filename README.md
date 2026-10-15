@@ -210,7 +210,7 @@ cd frontend && npm run build
 `frontend/.env` 里的 `VITE_AMAP_WEB_JS_KEY` 必须是**Web端(JS API)**类型的 Key,与后端那个 Key 不是一回事。
 
 **端口被占用**
-后端默认 8000、前端 5173。改 `backend/.env` 的 `PORT`,前端改 `vite.config.ts` 的 `server.port` 与代理目标。
+后端默认 8000、前端 5173、常驻的高德 MCP Server 默认 8001。改 `backend/.env` 的 `PORT`,前端改 `vite.config.ts` 的 `server.port` 与代理目标。
 
 ---
 
@@ -243,4 +243,4 @@ trip_planner/
 
 - 生产部署(容器化、限流、鉴权、结构化日志)尚未完成,详见 `NEXT_STEPS_CHECKLIST.md` 的 P1/P2。
 - 没有多轮对话与长期偏好记忆;每次请求都是独立规划。
-- 每次工具调用都会新建一个 MCP 会话(进程),高并发下开销明显。
+- 高德 MCP Server 已改为常驻 streamable-http(不再每次调用起进程);当前为单实例,高并发前应先压测。

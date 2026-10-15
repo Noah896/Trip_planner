@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     modelscope_api_key: str = ""
     llm_temperature: float = 0.7
     llm_timeout: int = 60
+    # Qwen3.5 默认开启 thinking(思考)模式,而该模式下服务端会拒绝
+    # tool_choice=required/object,导致 response_format 结构化输出直接 400。
+    # 关掉它既能让结构化输出生效,也能显著降低 4 次模型调用的耗时。
+    # 注意:enable_thinking 是 Qwen(ModelScope/DashScope)专用参数,
+    # 若换成其它 OpenAI 兼容服务商并遇到 400,请一并调整 llm_service。
+    llm_enable_thinking: bool = False
 
     # 兼容旧字段(保留以免破坏其他引用)
     openai_api_key: str = ""

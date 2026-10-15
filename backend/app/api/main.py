@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import get_settings, print_config, validate_config
+from ..services.amap_mcp import shutdown_amap_server
 from .routes import map as map_routes
 from .routes import poi, trip
 
@@ -42,6 +43,8 @@ async def lifespan(app: FastAPI):
     print("\n" + "=" * 60)
     print("👋 应用正在关闭...")
     print("=" * 60 + "\n")
+    # 回收常驻的高德 MCP Server(若由本进程拉起)
+    shutdown_amap_server()
 
 
 # 创建FastAPI应用
