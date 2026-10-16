@@ -12,7 +12,8 @@
 | 工作目录(可写根) | `E:\hello agents_demo\trip_planner\backend` |
 | Python | `E:\hello agents_demo\.venv\Scripts\python.exe` |
 | 跑测试(离线,不花额度) | `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 -m pytest -q` |
-| 隔离诊断耗时(见 4.2,`tool`/`detail` 阶段不花额度) | `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\diag_p0_latency.py --stages tool,attraction,planner` |
+| 隔离诊断耗时(见第 4 节,`tool`/`detail`/`retrieval` 都不花额度) | `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\diag_p0_latency.py --stages tool,retrieval,planner` |
+| 验证流式端点(**会花 1 次模型额度**) | 先起后端,再 `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\check_stream.py` |
 | 一键启动前后端 | `powershell -ExecutionPolicy Bypass -File scripts\dev.ps1` |
 | 端口 | 后端 8000 · 前端 5173 · 常驻高德 MCP Server 8001 |
 
@@ -84,11 +85,15 @@ Get-Process -Name python,uvx,uv -ErrorAction SilentlyContinue
 
 ## 3. 架构与关键文件
 
-一次 `/api/trip/plan` 的链路:
+一次请求的链路。两个端点共用同一张图,区别只在"什么时候告诉你":
 
 ```
-POST /api/trip/plan
-  └─ agents/trip_planner_agent.py  MultiAgentTripPlanner.plan_trip_with_status()
+POST /api/trip/plan          → 跑完整条链路再一次性返回
+POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE 进度
+```
+
+```
+  └─ agents/trip_planner_agent.py  plan_trip_with_status() / plan_trip_stream()
        └─ LangGraph StateGraph
             ├─ search_attractions ─┐
             ├─ query_weather      ─┼─ 三路并行
@@ -104,6 +109,7 @@ POST /api/trip/plan
 | --- | --- |
 | LangGraph 编排 / 规划 Agent / 兜底 | `app/agents/trip_planner_agent.py` |
 | 三路检索(确定性,不经过模型) | `app/services/trip_retrieval.py` |
+| 流式进度(SSE 端点 + 前端消费) | `app/api/routes/trip.py` · `frontend/src/views/Home.vue` |
 | 高德 MCP 连接与常驻 Server 生命周期 | `app/services/amap_mcp.py` |
 | LLM 客户端(含 thinking 开关) | `app/services/llm_service.py` |
 | 配置与凭据解析 | `app/config.py` |
@@ -114,6 +120,47 @@ POST /api/trip/plan
 ---
 
 ## 4. 进度日志
+
+### 2026-10-16(第四轮:流式进度,干等 57 秒 → 第 9 秒就有反馈)
+
+**这一轮没打算把 57 秒变短,而是把"等"变可见。** 实测耗时基本都压在那唯一一次
+模型调用上,前端却要盯着一个**假的**进度条(setInterval 每 500ms 加 10%,
+状态文案还是硬编码的"正在搜索景点…")干等一分钟 —— 这比慢本身更糟。
+
+1. **后端新增 `POST /api/trip/plan/stream`(SSE)**:
+   - `MultiAgentTripPlanner.plan_trip_stream()` 用 `graph.astream(stream_mode="updates")`
+     拿节点级事件,每完成一个节点推一条:
+     `{"type":"progress","stage","label","status","elapsed"}`;
+     三路检索都回来之后再补一条 `generate_plan running`(最长的那一步);
+     最后一条是 `{"type":"result",...}`,结构与原来的 `TripPlanResponse` 一致。
+   - **`/api/trip/plan` 完全没动**(契约稳定),两个端点共用同一套降级判断与提示语
+     (`result_message()`)。
+   - 流一旦开始就不能再改 HTTP 状态码,所以中途出错是推一条 `{"type":"error"}`。
+2. **前端把假进度换成真进度**(`api.ts` + `Home.vue`):
+   - `generateTripPlanStream()` 用 `fetch` + `ReadableStream` 手工解析 SSE
+     (axios 拿不到增量响应体);
+   - 进度条按**权重**走(三个检索各 10%、生成行程 70%),并列出每个阶段的
+     ✅ / ⏳ / ⚪ 与它自己的耗时;
+   - 生成那 30 秒里没有事件,于是另配一个**每秒跳动的"已用 n 秒"**——
+     它是真计时器,不是假进度,只是避免界面看着像死了。
+3. **新增 `scripts/check_stream.py`**:真实的 SSE 客户端,给每条事件打到达时间。
+   SSE 很容易被"攒到最后一起发"(反代缓冲、忘了 flush),这个脚本能在几秒内
+   看出真假 —— 脚本自己会判定并给出退出码。
+
+**实测**(北京 2 日游,`/plan/stream`):
+
+```
+  +   9.5s  进度  天气查询  done
+  +  20.6s  进度  景点检索  done
+  +  21.4s  进度  酒店检索  done
+  +  21.4s  进度  生成行程  running
+  +  39.5s  进度  生成行程  done
+  +  39.5s  结果  degraded=False days=2
+```
+
+事件分散在 30 秒里 = 真流式。用户第 9.5 秒就知道天气查完了,
+而不是盯着进度条猜。测试 85 → **95 全绿**(新增 `tests/test_trip_stream.py`);
+`npm run build`(vue-tsc + vite)通过。
 
 ### 2026-10-16(第三轮:检索不再经过模型,单次请求 112s → 57s)
 
@@ -268,22 +315,22 @@ POST /api/trip/plan
 
 ## 5. 下一步
 
-### P0 · 从 57 秒继续往下压(剩下的全在那"一次模型调用"上)
+### P0 · 从 40~57 秒继续往下压(剩下的全在那"一次模型调用"上)
 
-三路检索已经变成确定性调用(0 次模型),整条链路**只剩 1 次模型调用**,
+三路检索是确定性调用(0 次模型),整条链路**只剩 1 次模型调用**,
 而这一次就要 25~30 秒 —— 这是 ModelScope 单次生成的固有延迟,不是编排问题。
-可行方向:
+**"干等"这件事第四轮已经修掉了**(SSE 流式进度),剩下的是真耗时:
 
-1. **结果级缓存**:同一 (city, preferences, 日期, 住宿) 直接返回上次的 `TripPlan`(TTL)。
-   这是唯一能把"重复请求"压到秒级的手段。
-2. **流式输出**:规划那一步边生成边推给前端(`/plan` 改 SSE),
-   用户不用干等 60 秒白屏,前端超时压力也随之消失。
-3. **缩小输出体积**:`TripPlan` 结构偏大(每天酒店 + 三餐 + 2~3 景点 + 预算)。
-   若接受"预算 / 餐食由服务层兜底",模型输出能明显变短,生成时间随之下降。
-4. **换更快的模型**:同一份提示词换个更小更快的模型量一次,就知道差距有多大。
+1. **结果级缓存**(推荐下一个做):同一 (city, preferences, 日期, 住宿) 直接复用上次的
+   `TripPlan`(带 TTL)。这是唯一能把**重复请求**压进秒级的手段,演示效果也最直观。
+2. **缩小输出体积**:`TripPlan` 结构偏大(每天酒店 + 三餐 + 2~3 景点 + 预算)。
+   若接受"预算 / 餐食由服务层兜底",模型输出能明显变短,生成时间跟着下降。
+3. **换更快的模型**:同一份提示词换个更小更快的模型量一次,就知道差距有多大。
+4. (可选)**把规划也做到 token 级流式**:现在 SSE 只到节点级,生成那 30 秒里
+   只有计时器在动。要逐字输出就得让结构化输出改成增量解析,复杂度高不少。
 
 > 诊断工具已经就位:`--stages tool,detail,retrieval` **完全不花额度**;
-> `--stages graph` 现在也只要 1~2 次模型调用。
+> 流式端点用 `scripts/check_stream.py` 验证(花 1 次模型额度)。
 
 ### P1 · 坐标回填 —— ✅ 已完成(第三轮)
 
@@ -349,6 +396,25 @@ POST /api/trip/plan
 
 改动同样用 `git diff` 逐行核对过,`pytest` **72 全绿**(上一轮 61 + 新增 11),
 并且真实跑通了两次全链路(`degraded=false`)。
+
+### 第四轮(流式进度,已提交)
+
+```
+ M backend/AGENTS.md                          # 第 1/3/4/5/6 节
+ M README.md                                  # 接口一览 + 已知限制
+ M backend/app/agents/trip_planner_agent.py   # 新增 plan_trip_stream / NODE_LABELS / result_message
+ M backend/app/api/routes/trip.py             # 新增 POST /api/trip/plan/stream (SSE)
+?? backend/scripts/check_stream.py            # 新增:SSE 真伪校验客户端
+?? backend/tests/test_trip_stream.py          # 新增:流式事件序列与 SSE 分帧用例
+ M frontend/src/services/api.ts               # 新增 generateTripPlanStream(fetch + ReadableStream 解析 SSE)
+ M frontend/src/types/index.ts                # 流式事件类型
+ M frontend/src/views/Home.vue                # 假进度条 → 真实阶段进度 + 已用秒数
+```
+
+`pytest` **95 全绿**;`npm run build` 通过;真实 SSE 实测事件分散在 30 秒里到达。
+
+> 注:`frontend/src/services/api.ts` 里的 `generateTripPlan()`(非流式)保留未删 ——
+> `/api/trip/plan` 端点仍在,前端暂时没有调用方。
 
 ### 第三轮(检索去模型化,已提交 `19d9124`)
 

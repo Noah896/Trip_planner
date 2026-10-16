@@ -181,7 +181,7 @@
           </a-button>
         </a-form-item>
 
-        <!-- 加载进度条 -->
+        <!-- 加载进度(真实进度来自后端 SSE,不再是假动画) -->
         <a-form-item v-if="loading">
           <div class="loading-container">
             <a-progress
@@ -193,8 +193,19 @@
               }"
               :stroke-width="10"
             />
+            <ul class="loading-stages">
+              <li
+                v-for="stage in loadingStages"
+                :key="stage.label"
+                :class="stage.status"
+              >
+                <span class="stage-icon">{{ stageIcon(stage) }}</span>
+                <span class="stage-label">{{ stage.label }}</span>
+                <span v-if="stage.elapsed" class="stage-elapsed">{{ stage.elapsed }}s</span>
+              </li>
+            </ul>
             <p class="loading-status">
-              {{ loadingStatus }}
+              {{ loadingStatus }} · 已用 {{ elapsedSeconds }} 秒
             </p>
           </div>
         </a-form-item>
@@ -207,14 +218,84 @@
 import { ref, reactive, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { generateTripPlan } from '@/services/api'
-import type { TripFormData } from '@/types'
+import { generateTripPlanStream } from '@/services/api'
+import type { TripFormData, TripProgressEvent } from '@/types'
 import type { Dayjs } from 'dayjs'
 
 const router = useRouter()
 const loading = ref(false)
 const loadingProgress = ref(0)
 const loadingStatus = ref('')
+const elapsedSeconds = ref(0)
+
+type StageStatus = 'pending' | 'running' | 'done'
+interface LoadingStage {
+  label: string
+  status: StageStatus
+  elapsed?: number
+}
+
+// 与后端 NODE_LABELS 对应。进度条按**权重**走:前三个检索各 10%,
+// 生成行程占 70% —— 它自己实测就要 25~30 秒,平摊成 25% 会让进度条看着像卡住。
+const STAGE_WEIGHTS: Record<string, number> = {
+  景点检索: 10,
+  天气查询: 10,
+  酒店检索: 10,
+  生成行程: 70
+}
+
+const loadingStages = ref<LoadingStage[]>([])
+
+const resetStages = () => {
+  loadingStages.value = Object.keys(STAGE_WEIGHTS).map((label) => ({
+    label,
+    status: 'pending' as StageStatus
+  }))
+}
+
+// 进度本身不掺水;另外用一个每秒跳动的计时器告诉用户"还在跑"。
+let elapsedTimer: ReturnType<typeof setInterval> | null = null
+
+const startElapsedTicker = () => {
+  elapsedSeconds.value = 0
+  stopElapsedTicker()
+  elapsedTimer = setInterval(() => {
+    elapsedSeconds.value += 1
+  }, 1000)
+}
+
+const stopElapsedTicker = () => {
+  if (elapsedTimer !== null) {
+    clearInterval(elapsedTimer)
+    elapsedTimer = null
+  }
+}
+
+const applyProgress = (event: TripProgressEvent) => {
+  const stage = loadingStages.value.find((item) => item.label === event.label)
+  if (stage) {
+    stage.status = event.status
+    if (event.status === 'done') {
+      stage.elapsed = event.elapsed
+    }
+  }
+
+  const done = loadingStages.value
+    .filter((item) => item.status === 'done')
+    .reduce((sum, item) => sum + (STAGE_WEIGHTS[item.label] ?? 0), 0)
+  loadingProgress.value = Math.min(99, done)
+
+  loadingStatus.value =
+    event.status === 'running'
+      ? `⏳ 正在${event.label}...(预计 20~30 秒)`
+      : `✅ ${event.label}完成`
+}
+
+const stageIcon = (stage: LoadingStage) => {
+  if (stage.status === 'done') return '✅'
+  if (stage.status === 'running') return '⏳'
+  return '⚪'
+}
 
 type TripFormState = Omit<TripFormData, 'start_date' | 'end_date'> & {
   start_date: Dayjs | null
@@ -257,24 +338,8 @@ const handleSubmit = async () => {
   loading.value = true
   loadingProgress.value = 0
   loadingStatus.value = '正在初始化...'
-
-  // 模拟进度更新
-  const progressInterval = setInterval(() => {
-    if (loadingProgress.value < 90) {
-      loadingProgress.value += 10
-
-      // 更新状态文本
-      if (loadingProgress.value <= 30) {
-        loadingStatus.value = '🔍 正在搜索景点...'
-      } else if (loadingProgress.value <= 50) {
-        loadingStatus.value = '🌤️ 正在查询天气...'
-      } else if (loadingProgress.value <= 70) {
-        loadingStatus.value = '🏨 正在推荐酒店...'
-      } else {
-        loadingStatus.value = '📋 正在生成行程计划...'
-      }
-    }
-  }, 500)
+  resetStages()
+  startElapsedTicker()
 
   try {
     const requestData: TripFormData = {
@@ -288,9 +353,9 @@ const handleSubmit = async () => {
       free_text_input: formData.free_text_input
     }
 
-    const response = await generateTripPlan(requestData)
+    // 进度由后端通过 SSE 实时推过来,不再用 setInterval 假装
+    const response = await generateTripPlanStream(requestData, applyProgress)
 
-    clearInterval(progressInterval)
     loadingProgress.value = 100
     loadingStatus.value = '✅ 完成!'
 
@@ -313,9 +378,9 @@ const handleSubmit = async () => {
       message.error(response.message || '生成失败')
     }
   } catch (error: any) {
-    clearInterval(progressInterval)
     message.error(error.message || '生成旅行计划失败,请稍后重试')
   } finally {
+    stopElapsedTicker()
     setTimeout(() => {
       loading.value = false
       loadingProgress.value = 0
@@ -631,6 +696,38 @@ const handleSubmit = async () => {
   color: #667eea;
   font-size: 18px;
   font-weight: 500;
+}
+
+.loading-stages {
+  margin: 16px auto 0;
+  padding: 0;
+  list-style: none;
+  max-width: 320px;
+  text-align: left;
+}
+
+.loading-stages li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  color: #9aa0b4;
+  font-size: 14px;
+}
+
+.loading-stages li.running {
+  color: #667eea;
+  font-weight: 600;
+}
+
+.loading-stages li.done {
+  color: #52c41a;
+}
+
+.stage-elapsed {
+  margin-left: auto;
+  color: #b0b5c3;
+  font-size: 12px;
 }
 
 /* 动画 */

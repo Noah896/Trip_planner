@@ -16,10 +16,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, AsyncIterator, Dict, List, Optional, TypedDict
 
 from langchain.agents import create_agent
 from langgraph.graph import END, START, StateGraph
@@ -46,6 +47,27 @@ from ..utils.json_utils import extract_json
 # 三路检索并行 + 规划,每个子 Agent 的步数都会累加到同一个计数器上,
 # 真正约束单个 Agent 行为的是它自己那份 config(见 _run_agent)。
 GRAPH_RECURSION_LIMIT = 60
+
+# 节点名 → 给前端看的中文名(/plan/stream 的进度事件用)
+NODE_LABELS = {
+    "search_attractions": "景点检索",
+    "query_weather": "天气查询",
+    "search_hotels": "酒店检索",
+    "generate_plan": "生成行程",
+}
+
+# 三路检索:前者是**节点名**(报进度用),后者是它们写进 state 的**字段名**
+# (判断有没有拿到结果用)。两者别混 —— 混了就会出现"明明有结果却判成检索失败"。
+RETRIEVAL_NODES = ("search_attractions", "query_weather", "search_hotels")
+RETRIEVAL_RESULT_KEYS = ("attraction_result", "weather_result", "hotel_result")
+
+
+def result_message(degraded: bool) -> str:
+    """降级 / 正常两种情况共用的提示语(流式与非流式路由保持一致)。"""
+    if degraded:
+        return "AI 规划未完成,已返回占位行程(仅供参考,请稍后重试)"
+    return "旅行计划生成成功"
+
 
 # ============ 提示词 ============
 # 只有"规划"这一步需要模型:三路检索已经改成服务层确定性调用
@@ -426,6 +448,86 @@ class MultiAgentTripPlanner:
             print(f"❌ 生成旅行计划失败: {exc}")
             traceback.print_exc()
             return self._degrade(request, f"规划过程出错: {exc}")
+
+    async def plan_trip_stream(
+        self, request: TripRequest
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """生成旅行计划,并**边跑边报进度**(供 ``/api/trip/plan/stream`` 的 SSE 使用)。
+
+        与 :meth:`plan_trip_with_status` 的差别只在"什么时候告诉你":
+        后者等整条链路跑完(实测约 57 秒)才一次性返回;这里每完成一个节点
+        就吐一条进度事件,前端因此能显示**真实进度**,而不是拿 setInterval 假装。
+
+        Yields:
+            全部是可以直接 ``json.dumps`` 的 dict:
+
+            - ``{"type": "progress", "stage", "label", "status", "elapsed"}``
+              ``status`` 为 ``running``(某一步刚开始)或 ``done``(某一步已完成);
+            - ``{"type": "result", ...}``:最后一条,字段与 ``TripPlanResponse`` 一致。
+        """
+        settings = get_settings()
+        started = time.monotonic()
+        graph = await self._ensure_graph()
+
+        pending = set(RETRIEVAL_NODES)
+        final_state: Dict[str, Any] = {}
+        failure = ""
+
+        try:
+            async with asyncio.timeout(settings.plan_total_timeout):
+                async for chunk in graph.astream(
+                    {"request": request},
+                    config={"recursion_limit": GRAPH_RECURSION_LIMIT},
+                    stream_mode="updates",
+                ):
+                    # 同一批并行的节点可能落在同一个 chunk 里,逐个处理
+                    for node, update in (chunk or {}).items():
+                        if isinstance(update, dict):
+                            final_state.update(update)
+
+                        yield {
+                            "type": "progress",
+                            "stage": node,
+                            "label": NODE_LABELS.get(node, node),
+                            "status": "done",
+                            "elapsed": round(time.monotonic() - started, 1),
+                        }
+
+                        if node in pending:
+                            pending.discard(node)
+                            if not pending:
+                                yield {
+                                    "type": "progress",
+                                    "stage": "generate_plan",
+                                    "label": NODE_LABELS["generate_plan"],
+                                    "status": "running",
+                                    "elapsed": round(time.monotonic() - started, 1),
+                                }
+        except TimeoutError:
+            failure = f"规划超时(超过 {settings.plan_total_timeout} 秒,已放弃)"
+        except Exception as exc:  # noqa: BLE001 - 流式路径也要走降级而不是 500
+            print(f"❌ 流式规划失败: {exc}")
+            traceback.print_exc()
+            failure = f"规划过程出错: {exc}"
+
+        if failure:
+            outcome = self._degrade(request, failure)
+        elif not any(final_state.get(key) for key in RETRIEVAL_RESULT_KEYS):
+            outcome = self._degrade(request, "三路检索均无结果")
+        elif not isinstance(final_state.get("plan"), TripPlan):
+            outcome = self._degrade(request, "规划 Agent 未返回可用的结构化行程")
+        else:
+            outcome = PlanOutcome(plan=final_state["plan"])
+
+        yield {
+            "type": "result",
+            "success": True,
+            "degraded": outcome.degraded,
+            "reason": outcome.reason,
+            "message": result_message(outcome.degraded),
+            "elapsed": round(time.monotonic() - started, 1),
+            "data": outcome.plan.model_dump(mode="json"),
+        }
 
     def _degrade(self, request: TripRequest, reason: str) -> PlanOutcome:
         """返回兜底占位行程,并显式标记为降级结果。"""

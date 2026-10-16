@@ -18,7 +18,8 @@ START ─┬─> search_attractions ─┐
 
 - 前三个节点并行执行,都是**确定性**调用:直接调高德 MCP 工具 + 服务层解析,不经过模型(坐标来自 `maps_search_detail`,不是模型编的);
 - `generate_plan` 是**整条链路唯一的模型调用**:把三路结果汇总,用**结构化输出**直接产出 `TripPlan`(模型不支持时退回"纯文本 + JSON 解析");
-- 高德数据全部通过 MCP Server(`uvx amap-mcp-server`)获取,**不依赖模型记忆**。
+- 高德数据全部通过 MCP Server(`uvx amap-mcp-server`)获取,**不依赖模型记忆**;
+- `POST /api/trip/plan/stream` 会把每个节点的完成情况实时推给前端,前端据此显示真实进度。
 
 如果规划失败,后端**不会**假装成功:它仍会返回一份可渲染的占位行程,但会把 `degraded` 置为 `true`,前端顶部显示警示条。
 
@@ -110,7 +111,8 @@ macOS / Linux 把第 5 步换成两句话即可:
 | --- | --- | --- |
 | GET | `/health` | 进程存活检查 |
 | GET | `/api/trip/health` | 规划服务运行时信息(模型、图状态)。**未配置 LLM Key 时返回 503** |
-| POST | `/api/trip/plan` | 生成旅行计划 |
+| POST | `/api/trip/plan` | 生成旅行计划(整条链路跑完再返回) |
+| POST | `/api/trip/plan/stream` | 同上,但用 **SSE 实时推进度**(每完成一步推一条),前端据此显示真实进度 |
 | GET | `/api/map/poi` | POI 搜索 |
 | GET | `/api/map/weather` | 天气查询 |
 | POST | `/api/map/route` | 路线规划 |
@@ -241,6 +243,6 @@ trip_planner/
 ## 9. 已知限制
 
 - 生产部署(容器化、限流、鉴权、结构化日志)尚未完成,待办清单见 `backend/AGENTS.md` 第 5 节。
-- 一次 `/plan` 只需 1 次模型调用,但这一次单调用就要 20~30 秒(模型侧延迟),整体仍在 1 分钟量级;想再压下去要靠缓存或流式输出(见 `backend/AGENTS.md` 第 5 节)。
+- 一次 `/plan` 只剩 1 次模型调用,但这一次单调用就要 20~30 秒(模型侧延迟),整体仍在 40~60 秒。`/api/trip/plan/stream` 会实时推进度、用户不再干等,但总时长本身要靠结果缓存才压得下去(见 `backend/AGENTS.md` 第 5 节)。
 - 没有多轮对话与长期偏好记忆;每次请求都是独立规划。
 - 高德 MCP Server 已改为常驻 streamable-http(不再每次调用起进程);当前为单实例,高并发前应先压测。

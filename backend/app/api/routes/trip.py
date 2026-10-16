@@ -1,8 +1,12 @@
 """旅行规划API路由"""
 
-from fastapi import APIRouter, HTTPException
+import json
+from typing import AsyncIterator
 
-from ...agents.trip_planner_agent import get_trip_planner_agent
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+
+from ...agents.trip_planner_agent import get_trip_planner_agent, result_message
 from ...models.schemas import TripPlanResponse, TripRequest
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
@@ -48,11 +52,7 @@ async def plan_trip(request: TripRequest):
         return TripPlanResponse(
             success=True,
             degraded=outcome.degraded,
-            message=(
-                "AI 规划未完成,已返回占位行程(仅供参考,请稍后重试)"
-                if outcome.degraded
-                else "旅行计划生成成功"
-            ),
+            message=result_message(outcome.degraded),
             data=outcome.plan,
         )
 
@@ -62,6 +62,44 @@ async def plan_trip(request: TripRequest):
 
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"生成旅行计划失败: {str(e)}")
+
+
+@router.post(
+    "/plan/stream",
+    summary="生成旅行计划(流式进度)",
+    description=(
+        "返回的最终内容与 `/api/trip/plan` 完全一致,区别是**过程中就会推送进度**:"
+        "每完成一步(景点检索 / 天气查询 / 酒店检索 / 生成行程)推一条 SSE 事件,"
+        "前端据此显示真实进度,而不是盯着进度条干等一分钟。\n\n"
+        "事件形如 `data: {json}`,每条以空行分隔:progress 事件带 "
+        "`stage`/`label`/`status`/`elapsed`,最后一条是 result(结构同 TripPlanResponse)。"
+    ),
+)
+async def plan_trip_stream(request: TripRequest) -> StreamingResponse:
+    """生成旅行计划,并以 SSE 持续推送进度。"""
+    agent = get_trip_planner_agent()
+
+    print(f"\n📡 收到流式规划请求: {request.city} {request.start_date}~{request.end_date}")
+
+    async def event_source() -> AsyncIterator[str]:
+        try:
+            async for event in agent.plan_trip_stream(request):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:  # noqa: BLE001 - 流已经开始,只能把错误推给前端
+            print(f"❌ 流式规划中断: {type(exc).__name__}: {exc}")
+            payload = {"type": "error", "message": f"生成旅行计划失败: {exc}"}
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # 关掉反代缓冲,否则进度会被攒到最后一起发出来
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get(

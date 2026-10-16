@@ -95,3 +95,34 @@ export interface TripPlanResponse {
   data?: TripPlan
 }
 
+
+
+// ---------- /api/trip/plan/stream 的 SSE 事件 ----------
+
+/** 某一步的进度(景点检索 / 天气查询 / 酒店检索 / 生成行程) */
+export interface TripProgressEvent {
+  type: 'progress'
+  stage: string
+  label: string
+  status: 'running' | 'done'
+  elapsed: number
+}
+
+/** 最后一条:与 TripPlanResponse 内容一致 */
+export interface TripStreamResult {
+  type: 'result'
+  success: boolean
+  degraded: boolean
+  reason: string
+  message: string
+  elapsed: number
+  data: TripPlan
+}
+
+/** 流中途出错(此时 HTTP 状态码已经是 200,只能靠事件报错) */
+export interface TripStreamError {
+  type: 'error'
+  message: string
+}
+
+export type TripStreamEvent = TripProgressEvent | TripStreamResult | TripStreamError
