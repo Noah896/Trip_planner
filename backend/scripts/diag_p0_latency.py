@@ -8,8 +8,9 @@
 对象是「模型侧延迟」和「检索 Agent 自己反复调工具的循环」。本脚本把链路拆开
 单独计时,而不是一遍遍跑完整请求 —— 后者一次要打 4 个 Agent,既慢又费额度。
 
-**本脚本会真实调用大模型与高德接口,消耗额度。**
-默认三个阶段(直接工具调用 + 景点检索 Agent + 规划 Agent)约 4~6 次模型调用。
+**`tool` / `detail` / `retrieval` 三个阶段完全不调用大模型,零额度。**
+`planner` / `graph` 会真实调用模型:三路检索已经改成确定性服务层调用,
+所以 `graph` 现在也只要 1~2 次模型调用。
 
 用法
 ----
@@ -22,8 +23,8 @@
     # 只测工具链路,一次模型调用都不花
     ... --stages tool
 
-    # 单独测某个检索 Agent
-    ... --stages attraction --timeout 240
+    # 只跑三路检索(确定性调用,零额度)
+    ... --stages tool,detail,retrieval
 
     # 真实全链路(费用最高,注意 AGENTS.md 里的额度提醒)
     ... --stages graph
@@ -63,10 +64,7 @@ from langchain.agents import create_agent  # noqa: E402
 
 import app.services.amap_mcp as amap_mcp  # noqa: E402
 from app.agents.trip_planner_agent import (  # noqa: E402
-    ATTRACTION_AGENT_PROMPT,
-    HOTEL_AGENT_PROMPT,
     PLANNER_AGENT_PROMPT,
-    WEATHER_AGENT_PROMPT,
     MultiAgentTripPlanner,
 )
 from app.models.schemas import TripPlan, TripRequest  # noqa: E402
@@ -77,18 +75,17 @@ from app.services.amap_mcp import (  # noqa: E402
     shutdown_amap_server,
 )
 from app.services.llm_service import get_llm  # noqa: E402
+from app.services.trip_retrieval import (  # noqa: E402
+    retrieve_attractions,
+    retrieve_hotels,
+    retrieve_weather,
+)
 
 # ============ 默认测试数据 ============
 
 DEFAULT_CITY = "北京"
 DEFAULT_KEYWORDS = "历史文化"
 DEFAULT_PREFERENCES = ["历史文化", "美食"]
-
-AGENT_PROMPTS: Dict[str, Tuple[str, str]] = {
-    "attraction": ("景点检索 Agent", ATTRACTION_AGENT_PROMPT),
-    "weather": ("天气查询 Agent", WEATHER_AGENT_PROMPT),
-    "hotel": ("酒店检索 Agent", HOTEL_AGENT_PROMPT),
-}
 
 # 规划 Agent 不需要联网,喂固定输入即可单独计时。
 CANNED_ATTRACTIONS = """1. 故宫博物院 / 北京市东城区景山前街4号 / 116.397029,39.917839 / 历史文化 / 180分钟 / 60元 / 明清两代皇宫,中轴线核心
@@ -110,7 +107,7 @@ CANNED_HOTELS = """1. 北京王府井希尔顿酒店 / 北京市东城区王府�
 class Step:
     """一次 LLM 调用或一次工具调用。"""
 
-    kind: str  # "llm" | "tool"
+    kind: str  # "llm" | "tool" | "retrieve"
     name: str
     start: float  # 相对阶段起点的偏移(秒)
     duration: float
@@ -140,12 +137,20 @@ class Stage:
         return [s for s in self.steps if s.kind == "tool"]
 
     @property
+    def retrieval_steps(self) -> List[Step]:
+        return [s for s in self.steps if s.kind == "retrieve"]
+
+    @property
     def llm_total(self) -> float:
         return sum(s.duration for s in self.llm_steps)
 
     @property
     def tool_total(self) -> float:
         return sum(s.duration for s in self.tool_steps)
+
+    @property
+    def retrieval_total(self) -> float:
+        return sum(s.duration for s in self.retrieval_steps)
 
 
 # ============ 小工具 ============
@@ -501,25 +506,36 @@ async def stage_tool_direct(
     return stage
 
 
-async def stage_agent(
-    key: str,
-    query: str,
-    tools: Sequence[Any],
-    *,
-    timeout: float,
-    recursion_limit: int,
-) -> Stage:
-    label, prompt = AGENT_PROMPTS[key]
-    stage = Stage(label=label, timeout=timeout)
-    agent = create_agent(
-        model=get_llm(),
-        tools=list(tools),
-        system_prompt=prompt,
-        name=f"{key}_agent",
-    )
-    return await run_agent_traced(
-        agent, query, stage, timeout=timeout, recursion_limit=recursion_limit
-    )
+async def stage_retrieval(request: TripRequest, *, timeout: float) -> Stage:
+    """三路检索(确定性,不经过模型):分别计时景点 / 天气 / 酒店。"""
+    stage = Stage(label="三路检索(确定性,0 次模型调用)", timeout=timeout)
+    started = time.monotonic()
+
+    for label, func in (
+        ("景点", retrieve_attractions),
+        ("天气", retrieve_weather),
+        ("酒店", retrieve_hotels),
+    ):
+        begin = time.monotonic() - started
+        try:
+            async with asyncio.timeout(timeout):
+                text = await func(request)
+            note = f"输出 {len(text)} 字" + ("" if text else "(空结果)")
+        except TimeoutError:
+            stage.timed_out = True
+            stage.wall = time.monotonic() - started
+            return stage
+        except Exception as exc:  # noqa: BLE001
+            text = ""
+            note = f"失败 {type(exc).__name__}: {exc}"
+
+        stage.steps.append(
+            Step("retrieve", label, begin, time.monotonic() - started - begin, note)
+        )
+        stage.extra[f"{label}预览"] = _short(text, 160)
+
+    stage.wall = time.monotonic() - started
+    return stage
 
 
 async def stage_detail_direct(
@@ -682,10 +698,18 @@ def print_stage(stage: Stage, *, dump_messages: bool = False) -> None:
         for idx, step in enumerate(stage.tool_steps, 1):
             print(f"    {idx}) {step.duration:7.1f}s  {step.name}  {step.note}")
 
+    if stage.retrieval_steps:
+        print(
+            f"  确定性检索 {len(stage.retrieval_steps)} 段,"
+            f"合计 {stage.retrieval_total:.1f}s(0 次模型调用)"
+        )
+        for idx, step in enumerate(stage.retrieval_steps, 1):
+            print(f"    {idx}) {step.duration:7.1f}s  {step.name}  {step.note}")
+
     if stage.wall and stage.steps and _has_overlap(stage.steps):
         print("  注:存在并发执行的调用,逐项耗时之和大于墙钟耗时是正常的")
     elif stage.wall and (stage.llm_steps or stage.tool_steps):
-        other = stage.wall - stage.llm_total - stage.tool_total
+        other = stage.wall - stage.llm_total - stage.tool_total - stage.retrieval_total
         print(f"  其它开销(编排/事件流/解析): {other:.1f}s")
 
     for key, value in stage.extra.items():
@@ -729,25 +753,15 @@ def build_request(args: argparse.Namespace) -> TripRequest:
     )
 
 
-def build_agent_query(key: str, args: argparse.Namespace) -> str:
-    if key == "attraction":
-        return (
-            f"请调用高德地图工具搜索{args.city}的{args.keywords}相关景点,"
-            f"并按你的要求整理候选景点清单。"
-        )
-    if key == "weather":
-        return f"请查询{args.city}的天气信息"
-    return f"请搜索{args.city}的经济型酒店"
-
-
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="P0 耗时隔离诊断")
     parser.add_argument(
         "--stages",
-        default="tool,attraction,planner",
+        default="tool,retrieval,planner",
         help=(
-            "要跑的阶段,逗号分隔。可选 tool/detail/attraction/weather/hotel/planner/graph。"
-            "graph 是真实全链路,费用最高。默认 tool,attraction,planner"
+            "要跑的阶段,逗号分隔。可选 tool/detail/retrieval/planner/graph。"
+            "tool/detail/retrieval 都不调用大模型(零额度);"
+            "graph 是真实全链路,现在也只要 1~2 次模型调用"
         ),
     )
     parser.add_argument("--city", default=DEFAULT_CITY)
@@ -843,14 +857,8 @@ async def main_async(args: argparse.Namespace) -> int:
                     timeout=args.timeout,
                     concurrency=args.detail_concurrency,
                 )
-            elif key in AGENT_PROMPTS:
-                stage = await stage_agent(
-                    key,
-                    build_agent_query(key, args),
-                    tools,
-                    timeout=args.timeout,
-                    recursion_limit=args.recursion_limit,
-                )
+            elif key == "retrieval":
+                stage = await stage_retrieval(build_request(args), timeout=args.timeout)
             elif key == "planner":
                 stage = await stage_planner(
                     build_request(args),

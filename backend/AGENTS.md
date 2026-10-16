@@ -93,14 +93,17 @@ POST /api/trip/plan
             ├─ search_attractions ─┐
             ├─ query_weather      ─┼─ 三路并行
             ├─ search_hotels      ─┘
-            └─ generate_plan       → response_format=TripPlan 结构化输出
+            │     ↑ 三路都是 services/trip_retrieval.py 的**确定性调用**
+            │       (直接调高德 MCP + 服务层解析,**0 次模型**)
+            └─ generate_plan       → **唯一的模型调用**:response_format=TripPlan 结构化输出
                  失败 → planner_fallback + extract_json
-       任何一步失败 → _degrade() 返回占位行程,degraded=true(不假装成功)
+      任何一步失败 → _degrade() 返回占位行程,degraded=true(不假装成功)
 ```
 
 | 关注点 | 文件 |
 | --- | --- |
-| LangGraph 编排 / 4 个 Agent / 兜底 | `app/agents/trip_planner_agent.py` |
+| LangGraph 编排 / 规划 Agent / 兜底 | `app/agents/trip_planner_agent.py` |
+| 三路检索(确定性,不经过模型) | `app/services/trip_retrieval.py` |
 | 高德 MCP 连接与常驻 Server 生命周期 | `app/services/amap_mcp.py` |
 | LLM 客户端(含 thinking 开关) | `app/services/llm_service.py` |
 | 配置与凭据解析 | `app/config.py` |
@@ -111,6 +114,36 @@ POST /api/trip/plan
 ---
 
 ## 4. 进度日志
+
+### 2026-10-16(第三轮:检索不再经过模型,单次请求 112s → 57s)
+
+**第二轮指向的瓶颈是"模型调用次数",本轮把大头砍掉了:三路检索本来就是确定性的,
+根本不需要 Agent。**
+
+| | 改造前 | 改造后 |
+| --- | --- | --- |
+| 模型调用次数 | 10+ 次 | **1 次**(只有规划那一步) |
+| 三路检索 | 3 个 LLM Agent(景点那一路实测 4 次调用 / 58.9s) | 确定性调用,**0 次模型** / 17.7s |
+| 坐标 | 模型"看心情"发了 20 次 `maps_search_detail` | 服务层固定回填 6+6 个候选 |
+| 端到端 | 63.9s / 112.1s | **57.5s**(`degraded=false`) |
+
+1. **新增 `app/services/trip_retrieval.py`**:三路检索直接调高德 MCP 工具,再用
+   `AmapService` 解析,不经过模型。
+   - 景点:按前两个偏好词搜 POI → 按 id 去重 → **风景名胜(typecode ``11xxxx``)
+     稳定排序到前面**(否则用"美食"搜索会把饭馆混进景点清单)→ 回填详情。
+   - 天气:`maps_weather` → `_parse_weather` → 直接渲染成规划提示词要的字段顺序。
+   - 酒店:偏好词 + "酒店"两个关键词搜索 → 回填详情(坐标 / 评分)。
+2. **坐标回填一并解决(P1 完成)**:坐标取自 `maps_search_detail`,实测是真值
+   (八达岭 `116.016802,40.356188`、故宫 `116.397029,39.917839`),不再是模型编的。
+3. **回填数量有上界**:`_detail_budget(days) = min(12, max(6, days*3))`。
+   detail 在高德 MCP 上是**串行排队**的(第二轮实测),所以这个数直接等于耗时。
+4. **`app/agents/trip_planner_agent.py`**:删掉三个检索 Agent 及其三段提示词,
+   节点简化成 `return {"attraction_result": await retrieve_attractions(...)}` 这种一行。
+   整个文件现在只剩一个模型用途:规划 + 结构化输出。
+5. **诊断脚本同步**:新增 `retrieval` 阶段(`tool`/`detail`/`retrieval` 全部零额度),
+   `graph` 阶段现在也只要 1~2 次模型调用。
+
+测试:85 全绿(新增 `tests/test_trip_retrieval.py`)。
 
 ### 2026-10-16(第二轮:端到端终于跑通 `degraded=false`)
 
@@ -216,54 +249,48 @@ POST /api/trip/plan
 测试:50 → **61 全绿**(新增 `tests/test_amap_mcp.py`)。
 本轮改动已提交为 `6452c1b`(见第 6 节)。
 
-### 仍未解决(截至第二轮)
+### 仍未解决(截至第三轮)
 
-- ✅ **端到端已经跑出 `degraded=false`**(63.9s / 112.1s),详见上方第二轮日志。
-- ⚠️ **单次请求仍在 1~2 分钟量级**。主要成本是"一次请求要打 10+ 次模型调用"
-  (三路检索各 3~4 次 + 规划 1 次),而 ModelScope 单次调用就要 10~30 秒。
-  想进秒级必须**减少模型调用次数**,不是继续抠 MCP。
-- ⚠️ **`maps_search_detail` 并发无收益**:服务端会串行排队,10 并发时每次
-  7.6~9.3s,总时间和串行 0.9s×10 一样。检索 Agent 里"一次并发十个 detail"
-  等于白并发,只能靠减少调用次数。
+- ✅ **端到端稳定跑出 `degraded=false`**(第三轮 57.5s;第二轮 63.9s / 112.1s)。
+- ✅ **坐标已真实回填**(P1 完成,见第 5 节)。
+- ⚠️ **剩下的 57 秒里,那唯一一次模型调用占 25~30 秒**。
+  调用次数已经压到 1 次,再想提速只能靠结果缓存 / 流式输出 / 换更快的模型,
+  不属于"编排问题"了。
+- ⚠️ **`maps_search_detail` 串行排队**:10 并发时单次从 0.9s 涨到 7.6~9.3s,
+  总时间和串行一样。所以检索层刻意**串行**调用,靠控制条数(6+6)而不是靠并发。
 - ⚠️ **`langchain-mcp-adapters 0.3.2` 每次工具调用都会新建 MCP 会话**
-  (日志里是 session create + ListToolsRequest + CallToolRequest + DELETE 一整套),
-  三路 Agent 并发时偶发连接重置 —— 这就是子 Agent 静默失败的来源,
-  目前靠"重试一次 + root_cause 打真因"兜住。
-- ⚠️ **坐标仍未回填**(P1,见第 5 节)。
+  (日志里是 session create + ListToolsRequest + CallToolRequest + DELETE 一整套)。
+  调用次数从 20+ 降到 12 之后连接重置的几率小了很多,但根因还在。
+- ⚠️ **一次 `/plan` 的检索是 12 次 detail 串行**,约 11 秒;
+  如果哪天允许"不查详情的景点",这块还能再省。
 
 ---
 
 ## 5. 下一步
 
-### P0 · 把单次请求从分钟级压到秒级(当前最大的未解问题)
+### P0 · 从 57 秒继续往下压(剩下的全在那"一次模型调用"上)
 
-`/plan` 已经能正确返回,但一次要打 **10+ 次模型调用**
-(景点 3~4 + 天气 2 左右 + 酒店 2~3 + 规划 1),而 ModelScope 单次就要 10~30 秒,
-所以稳定落在 60~120 秒。**MCP 已经不是瓶颈,模型调用次数才是。**
-按性价比排序的可行方向:
+三路检索已经变成确定性调用(0 次模型),整条链路**只剩 1 次模型调用**,
+而这一次就要 25~30 秒 —— 这是 ModelScope 单次生成的固有延迟,不是编排问题。
+可行方向:
 
-1. **三路检索合并成 1 个 Agent、1 轮工具调用**。检索本身是确定性的
-   (关键词 → POI 列表 → 详情),没必要让模型自由发挥多轮。
-2. **天气根本不经过模型**:直接调 `maps_weather`,由服务层用
-   `AmapService._parse_weather` 解析成 `WeatherInfo`(解析函数已有测试覆盖),
-   省掉 2 次模型调用。
-3. **检索结果回填坐标后再喂给规划 Agent**(见 P1),输入更短、输出更短,
-   规划那一次调用的耗时也会跟着降。
-4. **结果级缓存**:同一 (city, preferences, 日期) 直接复用。
+1. **结果级缓存**:同一 (city, preferences, 日期, 住宿) 直接返回上次的 `TripPlan`(TTL)。
+   这是唯一能把"重复请求"压到秒级的手段。
+2. **流式输出**:规划那一步边生成边推给前端(`/plan` 改 SSE),
+   用户不用干等 60 秒白屏,前端超时压力也随之消失。
+3. **缩小输出体积**:`TripPlan` 结构偏大(每天酒店 + 三餐 + 2~3 景点 + 预算)。
+   若接受"预算 / 餐食由服务层兜底",模型输出能明显变短,生成时间随之下降。
+4. **换更快的模型**:同一份提示词换个更小更快的模型量一次,就知道差距有多大。
 
-> 诊断工具已经就位(`scripts/diag_p0_latency.py`),改完直接量,
-> 不用再靠"跑一遍整条链路猜"。
+> 诊断工具已经就位:`--stages tool,detail,retrieval` **完全不花额度**;
+> `--stages graph` 现在也只要 1~2 次模型调用。
 
-### P1 · 坐标回填(已确认的 bug,修法已验证)
+### P1 · 坐标回填 —— ✅ 已完成(第三轮)
 
-- **第二轮复测确认**:`maps_text_search` 返回 20 条 POI,`location` **全空**;
-  `maps_search_detail(poi_id)` 能拿到真坐标(实测 `115.930021,39.689369`)。
-- 现状是"模型自己看心情去调 detail"(第二轮实测检索 Agent 一口气发了 20 个
-  detail 调用),但这事应该由**服务层确定性回填**,而不是靠模型自觉。
-- 落点:`app/agents/trip_planner_agent.py` 的检索节点 + `app/services/amap_service.py`。
-- 顺带可以把 `rating` / `level` / `opentime` 也回填进去,前端信息更实。
-- 注意:detail 并发**没有收益**(服务端串行排队),回填时要么接受 0.9s/次 串行,
-  要么先只回填真正入选的那几个景点。
+- `maps_text_search` 返回的 POI **不含坐标**(复测 20 条 `location` 全空),
+  `maps_search_detail(poi_id)` 能拿到真坐标。
+- 现在由 `app/services/trip_retrieval.py` 在**服务层固定回填**,
+  不再依赖"模型记得去查";顺带把 `rating` / `opentime` / 门票也带了进来。
 
 ### P2 · 工程化
 
@@ -306,7 +333,7 @@ POST /api/trip/plan
 
 > 提示:提交后如果又改了代码,记得在**提交前**回来更新本节,别让这里和仓库状态对不上。
 
-### 第二轮(端到端跑通,尚未提交)
+### 第二轮(端到端跑通,已提交 `16a3d3f` / `ad7c18d`)
 
 ```
  M backend/AGENTS.md                        # 本节 + 第 4/5 节
@@ -322,3 +349,16 @@ POST /api/trip/plan
 
 改动同样用 `git diff` 逐行核对过,`pytest` **72 全绿**(上一轮 61 + 新增 11),
 并且真实跑通了两次全链路(`degraded=false`)。
+
+### 第三轮(检索去模型化,尚未提交)
+
+```
+ M backend/AGENTS.md                          # 第 3/4/5/6 节
+ M README.md                                  # 架构描述与已知限制同步
+ M backend/app/agents/trip_planner_agent.py   # 删掉三个检索 Agent 及其提示词
+?? backend/app/services/trip_retrieval.py     # 新增:确定性三路检索
+ M backend/scripts/diag_p0_latency.py         # 新增 retrieval 阶段,替换已删除的检索 Agent 阶段
+?? backend/tests/test_trip_retrieval.py       # 新增:检索层离线用例
+```
+
+`pytest` **85 全绿**;真实全链路 57.5s / `degraded=false`(改造前 63.9~112.1s)。

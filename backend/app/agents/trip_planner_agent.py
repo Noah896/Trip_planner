@@ -1,9 +1,9 @@
 """多智能体旅行规划系统(LangChain + LangGraph 版本)
 
 架构:
-    1. 三个"检索型"Agent(景点 / 天气 / 酒店),各自挂载高德 MCP 工具,
-       由 LangGraph 并行调度(三路互不依赖);
-    2. 一个"规划型"Agent 汇总三路结果,输出结构化 ``TripPlan``;
+    1. 三路检索(景点 / 天气 / 酒店)是**确定性**的:由 LangGraph 并行调度,
+       直接调高德 MCP 工具 + 服务层解析,不经过模型(见 services/trip_retrieval.py);
+    2. 唯一的模型调用是"规划型"Agent:汇总三路结果,输出结构化 ``TripPlan``;
     3. 对外仍暴露 ``plan_trip(request) -> TripPlan``,与旧实现保持一致,
        因此 FastAPI 路由与前端契约无需改动。
 
@@ -35,6 +35,11 @@ from ..models.schemas import (
 )
 from ..services.amap_mcp import get_amap_tools, root_cause
 from ..services.llm_service import get_llm
+from ..services.trip_retrieval import (
+    retrieve_attractions,
+    retrieve_hotels,
+    retrieve_weather,
+)
 from ..utils.json_utils import extract_json
 
 # 整张图的 super-step 上限。刻意比单 Agent 的 agent_recursion_limit 宽松得多:
@@ -42,39 +47,9 @@ from ..utils.json_utils import extract_json
 # 真正约束单个 Agent 行为的是它自己那份 config(见 _run_agent)。
 GRAPH_RECURSION_LIMIT = 60
 
-# ============ Agent 提示词 ============
-# 注意:相比 HelloAgents 版本,这里删掉了整段 "[TOOL_CALL:...]" 格式说明
-# —— LangChain 通过原生 function calling 调度工具,无需在提示词里教模型写协议。
-
-ATTRACTION_AGENT_PROMPT = """你是景点搜索专家。你的任务是根据城市和用户偏好,调用高德地图工具检索合适的景点。
-
-**重要提示:**
-必须调用工具获取真实景点数据,不要凭记忆编造景点。
-
-**要求:**
-1. 检索关键词要贴合用户偏好(如"历史文化""美食""公园")
-2. 如果一次结果太少,可以换关键词再检索一次
-3. 最终用简洁的中文逐条列出候选景点,每条包含:
-   名称 / 地址 / 经纬度 / 类别 / 建议游览时长(分钟) / 门票价格(元) / 一句话描述
-"""
-
-WEATHER_AGENT_PROMPT = """你是天气查询专家。你的任务是用高德地图天气工具查询指定城市未来几天的天气。
-
-**重要提示:**
-必须调用工具查询,不要编造天气数据。
-
-**要求:**
-温度只写数字(不要带 ℃)。逐条列出每天的:日期 / 白天天气 / 夜间天气 / 白天温度 / 夜间温度 / 风向 / 风力。
-"""
-
-HOTEL_AGENT_PROMPT = """你是酒店推荐专家。你的任务是根据城市和住宿偏好,用高德地图工具检索合适的酒店。
-
-**重要提示:**
-必须调用工具检索,不要编造酒店。
-
-**要求:**
-推荐 3-5 家酒店,每家给出:名称 / 地址 / 经纬度 / 类型 / 参考价格区间 / 评分,并简单说明适合人群。
-"""
+# ============ 提示词 ============
+# 只有"规划"这一步需要模型:三路检索已经改成服务层确定性调用
+# (见 services/trip_retrieval.py),所以不再需要检索型 Agent 的提示词。
 
 PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点、天气、酒店信息,生成详细的旅行计划。
 
@@ -263,30 +238,6 @@ class MultiAgentTripPlanner:
             print("  - 加载高德 MCP 工具...")
             self._tools = await get_amap_tools()
 
-            print("  - 创建景点检索 Agent...")
-            self.attraction_agent = create_agent(
-                model=self.llm,
-                tools=self._tools,
-                system_prompt=ATTRACTION_AGENT_PROMPT,
-                name="attraction_agent",
-            )
-
-            print("  - 创建天气查询 Agent...")
-            self.weather_agent = create_agent(
-                model=self.llm,
-                tools=self._tools,
-                system_prompt=WEATHER_AGENT_PROMPT,
-                name="weather_agent",
-            )
-
-            print("  - 创建酒店推荐 Agent...")
-            self.hotel_agent = create_agent(
-                model=self.llm,
-                tools=self._tools,
-                system_prompt=HOTEL_AGENT_PROMPT,
-                name="hotel_agent",
-            )
-
             print("  - 创建行程规划 Agent(结构化输出)...")
             self.planner_agent = create_agent(
                 model=self.llm,
@@ -353,27 +304,16 @@ class MultiAgentTripPlanner:
         return ""
 
     async def _search_attractions(self, state: TripPlanningState) -> Dict[str, Any]:
-        request = state["request"]
-        text = await self._run_agent(
-            self.attraction_agent, self._build_attraction_query(request), "景点检索"
-        )
-        return {"attraction_result": text}
+        """景点检索:直接调高德工具 + 服务层解析,不经过模型。"""
+        return {"attraction_result": await retrieve_attractions(state["request"])}
 
     async def _query_weather(self, state: TripPlanningState) -> Dict[str, Any]:
-        request = state["request"]
-        text = await self._run_agent(
-            self.weather_agent, f"请查询{request.city}的天气信息", "天气查询"
-        )
-        return {"weather_result": text}
+        """天气查询:直接用高德返回的结构化数据,不经过模型。"""
+        return {"weather_result": await retrieve_weather(state["request"])}
 
     async def _search_hotels(self, state: TripPlanningState) -> Dict[str, Any]:
-        request = state["request"]
-        text = await self._run_agent(
-            self.hotel_agent,
-            f"请搜索{request.city}的{request.accommodation}酒店",
-            "酒店检索",
-        )
-        return {"hotel_result": text}
+        """酒店检索:同上,确定性调用。"""
+        return {"hotel_result": await retrieve_hotels(state["request"])}
 
     async def _generate_plan(self, state: TripPlanningState) -> Dict[str, Any]:
         request = state["request"]
@@ -497,14 +437,6 @@ class MultiAgentTripPlanner:
         )
 
     # ---------- 查询构建 ----------
-
-    def _build_attraction_query(self, request: TripRequest) -> str:
-        """构建景点检索查询(自然语言,LangChain 会自行决定调用工具)。"""
-        keywords = request.preferences[0] if request.preferences else "景点"
-        return (
-            f"请调用高德地图工具搜索{request.city}的{keywords}相关景点,"
-            f"并按你的要求整理候选景点清单。"
-        )
 
     def _build_planner_query(
         self, request: TripRequest, attractions: str, weather: str, hotels: str = ""
