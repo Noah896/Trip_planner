@@ -229,18 +229,18 @@ trip_planner/
 │  │  └─ config.py                      # 配置与环境变量
 │  ├─ tests/                            # pytest(离线可跑)
 │  ├─ requirements.txt                  # 已锁定版本
-│  └─ run.py                            # 开发启动入口
+│  ├─ run.py                            # 开发启动入口
+│  └─ AGENTS.md                         # 工作交接文档(每次开工前先读)
 ├─ frontend/                            # Vue 3 + Vite
-├─ scripts/dev.ps1                      # 一键启动前后端
-├─ NEXT_STEPS_CHECKLIST.md              # 待办优先级(P0~P4)
-├─ BACKEND_REVIEW_AND_OPTIMIZATION.md   # 后端评审记录
-└─ REFACTOR_LANGCHAIN.md                # HelloAgents → LangChain 重构说明
+├─ README.md                            # 本文件
+└─ scripts/dev.ps1                      # 一键启动前后端
 ```
 
 ---
 
 ## 9. 已知限制
 
-- 生产部署(容器化、限流、鉴权、结构化日志)尚未完成,详见 `NEXT_STEPS_CHECKLIST.md` 的 P1/P2。
+- 生产部署(容器化、限流、鉴权、结构化日志)尚未完成,待办清单见 `backend/AGENTS.md` 第 5 节。
+- 一次 `/plan` 要打 10+ 次模型调用,耗时在 1~2 分钟量级(原因与优化方向见 `backend/AGENTS.md` 第 5 节)。
 - 没有多轮对话与长期偏好记忆;每次请求都是独立规划。
 - 高德 MCP Server 已改为常驻 streamable-http(不再每次调用起进程);当前为单实例,高并发前应先压测。
