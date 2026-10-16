@@ -104,13 +104,17 @@ async def _enrich(
     enriched: List[Dict[str, Any]] = []
 
     for poi in pois:
-        detail = await service.get_poi_detail(poi.id)
+        # 没有 id 的候选(地理编码解析出来的"用户指定")没有详情可查,直接用它的坐标
+        detail = await service.get_poi_detail(poi.id) if poi.id else {}
         detail = detail if isinstance(detail, dict) else {}
+        location = _location_text(detail.get("location"))
+        if location == "未知" and poi.location is not None:
+            location = f"{poi.location.longitude},{poi.location.latitude}"
         enriched.append(
             {
                 "name": poi.name or detail.get("name") or "",
                 "address": poi.address or detail.get("address") or "",
-                "location": _location_text(detail.get("location")),
+                "location": location,
                 "type": detail.get("type") or poi.type or "",
                 "rating": detail.get("rating") or "",
                 "cost": _cost_text(detail.get("cost")),
@@ -119,6 +123,37 @@ async def _enrich(
         )
 
     return enriched
+
+
+async def _resolve_must_visit(
+    service: AmapService, names: Sequence[str], city: str
+) -> List[POIInfo]:
+    """把用户**点名的**景点解析成候选(POI 或至少一个坐标)。
+
+    按名字搜一次;搜不到(口语简称、多字少字)就退回地理编码拿坐标 ——
+    宁可坐标是地理编码来的,也不能因为"搜不到"就把用户的明确要求丢掉。
+    """
+    resolved: List[POIInfo] = []
+
+    for name in names:
+        if not name:
+            continue
+
+        pois = await service.search_poi(name, city)
+        if pois:
+            resolved.append(pois[0])
+            continue
+
+        location = await service.geocode(name, city)
+        if location is not None:
+            print(f"ℹ️  「{name}」搜不到 POI,用地理编码拿到了坐标")
+            resolved.append(
+                POIInfo(id="", name=name, type="用户指定", address="", location=location)
+            )
+        else:
+            print(f"⚠️  「{name}」既搜不到 POI 也解析不出坐标,只能把名字带下去")
+
+    return resolved
 
 
 def _attraction_rank(poi: POIInfo) -> int:
@@ -198,13 +233,25 @@ async def retrieve_attractions(request: TripRequest) -> str:
     limit = _detail_budget(request.travel_days, ATTRACTION_MIN, ATTRACTION_MAX)
 
     try:
-        pois = await _collect_pois(service, keywords, request.city)
-        pois.sort(key=_attraction_rank)
+        # 1) 用户点名的景点**优先**:先按名字把它们解析出来,占住候选池最前面。
+        #    这一步是"用户选了什么就必须有什么"的落点 —— 以前它们只以自由文本形式
+        #    存在,检索根本不知道,于是规划能把用户选的地方排到角落、甚至排掉。
+        pinned = await _resolve_must_visit(service, request.must_visit or [], request.city)
+
+        # 2) 再用偏好词补充其余候选,并去掉和必去重复的
+        pinned_ids = {poi.id for poi in pinned if poi.id}
+        rest = await _collect_pois(service, keywords, request.city)
+        rest = [poi for poi in rest if poi.id not in pinned_ids]
+        rest.sort(key=_attraction_rank)
+
+        pois = pinned + rest
         items = await _enrich(service, pois[:limit])
     except Exception as exc:  # noqa: BLE001 - 检索失败不该让整条链路 500
         print(f"⚠️  景点检索失败: {type(exc).__name__}: {exc}")
         return ""
 
+    if pinned:
+        print(f"📌 用户指定必去 {len(pinned)} 个,已置顶")
     print(f"🔍 景点检索完成:关键词={keywords},回填 {len(items)} 个候选")
     return _render_attractions(items)
 

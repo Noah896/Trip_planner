@@ -158,6 +158,104 @@ class TestRetrieveAttractions:
         assert asyncio.run(trip_retrieval.retrieve_attractions(_request())) == ""
 
 
+class TestMustVisit:
+    """用户点名的景点必须是硬约束,而不是一句自由文本。"""
+
+    def test_pinned_poi_goes_first_even_if_preferences_point_elsewhere(self, monkeypatch):
+        service = _FakeService(
+            pois_by_keyword={
+                # 用户点名的那个
+                "故宫博物院": [
+                    {"id": "P1", "name": "故宫博物院", "type": "110202", "address": "景山前街4号"}
+                ],
+                # 偏好词搜出来的一堆
+                "历史文化": [
+                    {"id": "S1", "name": "天坛公园", "type": "110202", "address": "天坛东里"},
+                    {"id": "S2", "name": "颐和园", "type": "110202", "address": "新建宫门路"},
+                ],
+            },
+            details={
+                "P1": {"location": "116.397029,39.917839"},
+                "S1": {"location": "116.4121,39.882"},
+                "S2": {"location": "116.275,39.999"},
+            },
+        )
+        monkeypatch.setattr(trip_retrieval, "get_amap_service", lambda: service)
+
+        text = asyncio.run(
+            trip_retrieval.retrieve_attractions(
+                _request(preferences=["历史文化"], must_visit=["故宫博物院"])
+            )
+        )
+
+        # 第一条就是用户点名要的那个
+        assert text.splitlines()[0].startswith("1. 故宫博物院")
+        # 而且真的回填了它的坐标
+        assert "116.397029,39.917839" in text
+
+    def test_not_duplicated_when_it_also_matches_preferences(self, monkeypatch):
+        service = _FakeService(
+            pois_by_keyword={
+                "故宫博物院": [
+                    {"id": "P1", "name": "故宫博物院", "type": "110202", "address": "景山前街4号"}
+                ],
+                "历史文化": [
+                    {"id": "P1", "name": "故宫博物院", "type": "110202", "address": "景山前街4号"}
+                ],
+            },
+            details={"P1": {"location": "116.397029,39.917839"}},
+        )
+        monkeypatch.setattr(trip_retrieval, "get_amap_service", lambda: service)
+
+        text = asyncio.run(
+            trip_retrieval.retrieve_attractions(
+                _request(preferences=["历史文化"], must_visit=["故宫博物院"])
+            )
+        )
+
+        assert text.count("故宫博物院") == 1
+        assert service.detail_calls == ["P1"]
+
+    def test_falls_back_to_geocode_when_name_search_finds_nothing(self, monkeypatch):
+        """用户说的是口语简称("故宫")时,搜不到 POI 也要把坐标拿到。"""
+
+        class _Geo(_FakeService):
+            async def geocode(self, address, city=None):
+                from app.models.schemas import Location
+
+                if address == "故宫":
+                    return Location(longitude=116.397029, latitude=39.917839)
+                return None
+
+        service = _Geo(pois_by_keyword={})
+        monkeypatch.setattr(trip_retrieval, "get_amap_service", lambda: service)
+
+        text = asyncio.run(
+            trip_retrieval.retrieve_attractions(_request(must_visit=["故宫"]))
+        )
+
+        assert "故宫" in text
+        assert "116.397029,39.917839" in text
+        # 没有 id 的候选不该去调 detail(会白白打一次接口)
+        assert service.detail_calls == []
+
+    def test_without_must_visit_nothing_changes(self, monkeypatch):
+        service = _FakeService(
+            pois_by_keyword={
+                "历史文化": [
+                    {"id": "S1", "name": "天坛公园", "type": "110202", "address": "天坛东里"}
+                ]
+            },
+            details={"S1": {"location": "116.4121,39.882"}},
+        )
+        monkeypatch.setattr(trip_retrieval, "get_amap_service", lambda: service)
+
+        text = asyncio.run(trip_retrieval.retrieve_attractions(_request()))
+
+        assert "天坛公园" in text
+        assert service.searched_keywords == ["历史文化"]
+
+
 class TestRetrieveWeather:
     def test_renders_expected_field_order(self, monkeypatch):
         weather = [

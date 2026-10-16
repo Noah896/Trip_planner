@@ -57,10 +57,17 @@ class ChatDecision(BaseModel):
     transportation: Optional[str] = Field(default=None, description="交通方式")
     accommodation: Optional[str] = Field(default=None, description="住宿偏好")
     preferences: List[str] = Field(default_factory=list, description="偏好标签")
+    must_visit: List[str] = Field(
+        default_factory=list,
+        description=(
+            "用户**明确点名**要去的景点/地点(比如从你推荐的选项里挑了「故宫博物院」)。"
+            "这是硬约束,必须带下去"
+        ),
+    )
     free_text_input: str = Field(default="", description="其它明确要求")
     missing: List[str] = Field(default_factory=list, description="还缺哪些信息(中文名)")
 
-    @field_validator("preferences", "missing", mode="before")
+    @field_validator("preferences", "missing", "must_visit", mode="before")
     @classmethod
     def _accept_string_lists(cls, value: Any) -> Any:
         """容忍模型把数组写成 ``"历史文化、美食"`` 这种字符串(实测会发生)。"""
@@ -159,10 +166,19 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
      实测过模型把"三天"算成"两天",导致行程少一天 —— 这类推算全部交给后端做。
    - 但相对时间仍要换算成具体日期(用户消息里会给出"今天是 X",以此为基准):
      "下周末"、"国庆"、"后天" 这些属于**用户没说绝对日期**,需要你算。
+   - **用户完全没提时间时(既没有具体日期,也没有"下周末/国庆/三天后"这类说法),
+     `start_date` / `end_date` 一律留空** —— 不要自己挑一个日期。
+     实测踩过:用户只说"玩三天",模型自己编了个出发日,于是直接生成了一份
+     用户从没同意过日期的行程。这种情况应该追问出发时间。
 2. **没提到的字段一律留空,不要编造**。交通、住宿留空时下游会兜底成
    "公共交通 / 经济型酒店"。
 3. preferences 是偏好标签数组,例如 ["历史文化", "美食", "亲子"]。
 4. 用户在补充信息时,结合对话历史把条件合并齐,别丢掉之前说过的。
+5. **用户点名要去的地方必须填进 `must_visit`**。典型场景:你上一轮推荐了几个景点,
+   用户回了一句"就去故宫""第一个吧""兵马俑"—— 那就要把 **完整的名称**(如
+   "故宫博物院")放进 `must_visit`,不能只留在对话里。这一条**不能漏**:
+   漏了的话下游检索不到它,规划就会把用户选的景点当成普通候选、甚至排掉。
+   注意区分:`must_visit` 是"一定要去的具体地点",`preferences` 只是"偏好类型"。
 
 **reply 字段**(用一句自然、简短的中文):
 - intent=plan:复述你理解到的需求,例如"好的,北京 3 天,10-16 出发,我这就开始规划";
@@ -273,6 +289,7 @@ def build_trip_request(decision: ChatDecision) -> Optional[TripRequest]:
             transportation=(decision.transportation or "").strip() or DEFAULT_TRANSPORTATION,
             accommodation=(decision.accommodation or "").strip() or DEFAULT_ACCOMMODATION,
             preferences=[str(p).strip() for p in (decision.preferences or []) if str(p).strip()],
+            must_visit=[str(p).strip() for p in (decision.must_visit or []) if str(p).strip()],
             free_text_input=(decision.free_text_input or "").strip(),
         )
     except Exception as exc:  # noqa: BLE001 - 拼不出来就退回追问,别让请求 500

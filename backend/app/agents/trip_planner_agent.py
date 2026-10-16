@@ -153,6 +153,9 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
     上面没给的景点一律不要写进行程;信息不足时宁可少排,也不要编。
 11. 本服务只覆盖**中国大陆**(数据源是高德地图)。上面若没有任何景点检索结果,
     说明这个城市查不到真实数据 —— 此时不要凭想象生成行程。
+12. **用户指定必去的景点必须安排进行程,而且要优先安排** —— 不能当成普通候选
+    挑挑拣拣、更不能丢掉。它们的真实信息已经尽量放进上面的候选里了;
+    万一没找到,就按用户给的名称写进去。
 """
 
 
@@ -588,6 +591,10 @@ class MultiAgentTripPlanner:
 5. 返回完整的JSON格式数据
 6. 景点的经纬度坐标要真实准确
 """
+        if request.must_visit:
+            listed = "\n".join(f"- {name}" for name in request.must_visit)
+            query += f"\n**用户指定必去(必须安排进行程,且优先):**\n{listed}\n"
+
         if request.free_text_input:
             query += f"\n**额外要求:** {request.free_text_input}"
 

@@ -101,6 +101,35 @@ class TestBuildTripRequest:
         assert trip.accommodation == chat_service.DEFAULT_ACCOMMODATION
         assert trip.preferences == ["历史文化", "美食"]
 
+    def test_must_visit_is_carried_through(self):
+        """用户从推荐里挑了一个景点 —— 这个选择必须带进 TripRequest。
+
+        踩过的坑:它以前只以自由文本形式存在,检索根本不知道,
+        于是规划把用户选的景点排到角落,后面几天全用别的候选填。
+        """
+        trip = build_trip_request(
+            _decision(
+                start_date="2026-10-16",
+                travel_days=3,
+                must_visit=["故宫博物院", "  "],
+            )
+        )
+        assert trip is not None
+        assert trip.must_visit == ["故宫博物院"]
+
+    def test_must_visit_written_as_string_is_tolerated(self):
+        decision = ChatDecision.model_validate(
+            {"intent": "plan", "must_visit": "故宫博物院、天坛"}
+        )
+        assert decision.must_visit == ["故宫博物院", "天坛"]
+
+
+class TestMustVisitPrompt:
+    def test_prompt_requires_filling_must_visit(self):
+        prompt = chat_service.CHAT_SYSTEM_PROMPT
+        assert "必须填进 `must_visit`" in prompt
+        assert "不能漏" in prompt
+
 
 class TestDecisionTolerance:
     def test_preferences_written_as_string(self):
