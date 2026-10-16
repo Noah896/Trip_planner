@@ -145,15 +145,32 @@ class TestScopeConstraints:
         prompt = chat_service.CHAT_SYSTEM_PROMPT
         assert "只覆盖中国大陆" in prompt
         # 明确要求境外时不要凭记忆编
-        assert "不要凭自己的记忆推荐" in prompt
-        # 也不许自己挑一个城市
-        assert "不要自己挑一个城市" in prompt
+        assert "境外内容不要凭记忆推荐" in prompt
+        # 生成行程时不许替用户挑城市(注意:这条只作用于 plan,见下面那个用例)
+        assert "不能替他挑一个城市" in prompt
 
     def test_planner_prompt_says_use_only_retrieved_data(self):
         from app.agents.trip_planner_agent import PLANNER_AGENT_PROMPT
 
         assert "只能用上面提供的信息" in PLANNER_AGENT_PROMPT
         assert "只覆盖**中国大陆**" in PLANNER_AGENT_PROMPT
+
+    def test_prompt_does_not_block_helping_without_a_city(self):
+        """回归:曾经写过"用户没说城市时不要自己挑一个,应该追问",
+
+        结果模型被推广成"没有城市就什么都不给",用户说"你随便推荐一个"时
+        被连续追问三轮城市。范围约束只能限住「生成行程」,不能限住「聊天推荐」。
+        """
+        prompt = chat_service.CHAT_SYSTEM_PROMPT
+        assert "但「只是聊天 / 让你推荐」不在此列" in prompt
+        assert "不要再问同一个问题" in prompt
+        # 让用户能从选项里挑,而不是被反复盘问
+        assert "2~4 个具体选项" in prompt
+
+    def test_prompt_tells_model_not_to_recite_internal_rules(self):
+        """别把"数据源只覆盖中国大陆"这类内部规则念给用户听 ——
+        用户没问境外的时候,这句话只会让人觉得莫名其妙。"""
+        assert "不要把你的规则念给用户听" in chat_service.CHAT_SYSTEM_PROMPT
 
 
 class TestDecideFallback:
