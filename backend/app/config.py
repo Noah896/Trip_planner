@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     # 注意:enable_thinking 是 Qwen(ModelScope/DashScope)专用参数,
     # 若换成其它 OpenAI 兼容服务商并遇到 400,请一并调整 llm_service。
     llm_enable_thinking: bool = False
+    # 模型单次输出上限(token)。0 表示不限制。
+    # 默认关闭:结构化输出被截断会直接判失败,而实测的失败原因是 schema 不匹配、
+    # 不是输出过长,所以这里保持"能用就不加约束"。
+    llm_max_tokens: int = 0
+    # 单个检索/规划 Agent 的 LangGraph 循环上限。
+    # 结构化输出一旦校验失败,模型会把同样的参数重发一遍,不加约束就会一直重试
+    # (实测 6 次重试 = 100 秒),这里给出明确的收敛边界。
+    agent_recursion_limit: int = 12
+    # 整条 /api/trip/plan 的墙钟上限(秒)。
+    # LLM_TIMEOUT 只约束"两次读取之间的间隔",对流式响应不构成总时长约束,
+    # 所以必须另有一个总闸:超时直接降级,而不是把客户端超时打满。
+    plan_total_timeout: int = 240
 
     # 兼容旧字段(保留以免破坏其他引用)
     openai_api_key: str = ""

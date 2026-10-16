@@ -1,6 +1,6 @@
 """降级(兜底占位行程)逻辑测试
 
-对应 NEXT_STEPS_CHECKLIST 里的 P1 项:"修掉'假数据当成功'"。
+对应早期规划清单里的 P1 项:"修掉'假数据当成功'"。
 这里不初始化 LLM,直接复用 ``MultiAgentTripPlanner.__new__`` 或子类,
 因此可以在无 API Key 的环境下跑通。
 """
@@ -30,13 +30,21 @@ def _bare_planner() -> MultiAgentTripPlanner:
 class _EmptyGraph:
     """三路检索全部返回空的图。"""
 
-    async def ainvoke(self, state):
+    async def ainvoke(self, state, config=None):
         return {}
 
 
 class _BrokenGraph:
-    async def ainvoke(self, state):
+    async def ainvoke(self, state, config=None):
         raise RuntimeError("模型服务不可用")
+
+
+class _HangingGraph:
+    """永远不返回的图,用于验证总时长上限会把它掐掉并降级。"""
+
+    async def ainvoke(self, state, config=None):
+        await asyncio.sleep(3600)
+        return {}
 
 
 class _GraphPlanner(MultiAgentTripPlanner):
@@ -103,6 +111,18 @@ class TestDegradedSignalling:
 
         assert outcome.degraded is True
         assert "规划过程出错" in outcome.reason
+
+    def test_total_timeout_is_marked_degraded(self, monkeypatch):
+        """总时长上限必须兜住"图一直不返回"的情况(LLM_TIMEOUT 管不到总时长)。"""
+        from app.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "plan_total_timeout", 1)
+        planner = _GraphPlanner(_HangingGraph())
+
+        outcome = asyncio.run(planner.plan_trip_with_status(_request()))
+
+        assert outcome.degraded is True
+        assert "规划超时" in outcome.reason
 
     def test_degrade_keeps_plan_and_reason(self):
         outcome = _bare_planner()._degrade(_request(), "测试原因")

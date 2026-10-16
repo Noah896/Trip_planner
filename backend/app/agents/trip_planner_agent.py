@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 from langchain.agents import create_agent
 from langgraph.graph import END, START, StateGraph
 
+from ..config import get_settings
 from ..models.schemas import (
     Attraction,
     DayPlan,
@@ -32,9 +33,14 @@ from ..models.schemas import (
     TripPlan,
     TripRequest,
 )
-from ..services.amap_mcp import get_amap_tools
+from ..services.amap_mcp import get_amap_tools, root_cause
 from ..services.llm_service import get_llm
 from ..utils.json_utils import extract_json
+
+# 整张图的 super-step 上限。刻意比单 Agent 的 agent_recursion_limit 宽松得多:
+# 三路检索并行 + 规划,每个子 Agent 的步数都会累加到同一个计数器上,
+# 真正约束单个 Agent 行为的是它自己那份 config(见 _run_agent)。
+GRAPH_RECURSION_LIMIT = 60
 
 # ============ Agent 提示词 ============
 # 注意:相比 HelloAgents 版本,这里删掉了整段 "[TOOL_CALL:...]" 格式说明
@@ -317,15 +323,34 @@ class MultiAgentTripPlanner:
     # ---------- 图节点 ----------
 
     async def _run_agent(self, agent: Any, query: str, label: str) -> str:
-        """执行一个子 Agent,失败时返回空串而不中断整张图。"""
-        try:
-            result = await agent.ainvoke(
-                {"messages": [{"role": "user", "content": query}]}
-            )
-            return _last_message_text(result)
-        except Exception as exc:
-            print(f"⚠️  {label} 执行失败: {exc}")
-            return ""
+        """执行一个子 Agent,失败时返回空串而不中断整张图。
+
+        带上 ``recursion_limit`` 是有意为之:结构化输出或工具调用一旦进入
+        "把同一份参数原样重发"的循环,不加约束会一路烧到客户端超时
+        (实测 6 次重试 100 秒,端到端 11 分钟不返回)。
+
+        另:高德 MCP 走的是常驻 HTTP 连接,三路 Agent 并发时偶发连接被重置,
+        客户端只会看到 anyio 包出来的 "unhandled errors in a TaskGroup"。
+        这类瞬时失败重试一次即可,不该让整条检索分支直接变成空结果。
+        """
+        messages = {"messages": [{"role": "user", "content": query}]}
+        config = {"recursion_limit": get_settings().agent_recursion_limit}
+
+        for attempt in (1, 2):
+            try:
+                result = await agent.ainvoke(messages, config=config)
+                return _last_message_text(result)
+            except Exception as exc:
+                # 用 root_cause 剥掉 ExceptionGroup/TaskGroup 包装,否则日志里
+                # 只剩 "unhandled errors in a TaskGroup (1 sub-exception)",
+                # 真正的报错(例如连接被重置)全被埋掉。
+                reason = root_cause(exc)
+                if attempt == 1:
+                    print(f"⚠️  {label} 第 1 次执行失败,重试一次: {reason}")
+                else:
+                    print(f"⚠️  {label} 执行失败: {reason}")
+
+        return ""
 
     async def _search_attractions(self, state: TripPlanningState) -> Dict[str, Any]:
         request = state["request"]
@@ -371,7 +396,8 @@ class MultiAgentTripPlanner:
         """
         try:
             result = await self.planner_agent.ainvoke(
-                {"messages": [{"role": "user", "content": query}]}
+                {"messages": [{"role": "user", "content": query}]},
+                config={"recursion_limit": get_settings().agent_recursion_limit},
             )
             structured = result.get("structured_response")
             if isinstance(structured, TripPlan):
@@ -422,7 +448,22 @@ class MultiAgentTripPlanner:
             print(f"{'=' * 60}\n")
 
             graph = await self._ensure_graph()
-            final_state = await graph.ainvoke({"request": request})
+            settings = get_settings()
+
+            # LLM_TIMEOUT 只约束"两次读取之间的间隔",对流式响应不构成总时长约束,
+            # 所以这里再加一道总闸:宁可早降级,也不把客户端超时打满。
+            try:
+                final_state = await asyncio.wait_for(
+                    graph.ainvoke(
+                        {"request": request},
+                        config={"recursion_limit": GRAPH_RECURSION_LIMIT},
+                    ),
+                    timeout=settings.plan_total_timeout,
+                )
+            except asyncio.TimeoutError:
+                return self._degrade(
+                    request, f"规划超时(超过 {settings.plan_total_timeout} 秒,已放弃)"
+                )
 
             results = (
                 final_state.get("attraction_result"),

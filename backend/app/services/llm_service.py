@@ -35,13 +35,21 @@ def get_llm() -> ChatOpenAI:
                 "或 MODELSCOPE_API_KEY"
             )
 
+        extra_body: dict = {"enable_thinking": settings.llm_enable_thinking}
+
         _llm_instance = ChatOpenAI(
             model=model,
             api_key=api_key,
             base_url=base_url or None,
             temperature=settings.llm_temperature,
             timeout=settings.llm_timeout,
-            extra_body={"enable_thinking": settings.llm_enable_thinking},
+            # 0 / 负数表示不限制,不传该参数(见 config.llm_max_tokens 的说明)
+            **(
+                {"max_tokens": settings.llm_max_tokens}
+                if settings.llm_max_tokens > 0
+                else {}
+            ),
+            extra_body=extra_body,
         )
 
         print("✅ LLM 服务初始化成功 (LangChain ChatOpenAI)")
@@ -56,4 +64,3 @@ def reset_llm() -> None:
     """重置 LLM 实例(用于测试或重新配置)"""
     global _llm_instance
     _llm_instance = None
-

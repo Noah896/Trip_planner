@@ -1,8 +1,43 @@
 """数据模型定义"""
 
+import contextlib
+import json
 from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from datetime import date
+
+
+# ============ 模型输出的容错解析 ============
+# 背景(2026-10-16 实测):Qwen3.5 在结构化输出里会把**嵌套对象写成 JSON 字符串**,
+# 例如 ``"budget": "{\"total\": 1140}"``。Pydantic 对此直接报 model_type 错误,
+# 而 LangChain 的结构化输出失败后会回灌错误让模型重试 —— 模型却把**一模一样的
+# 参数**再发一遍,于是无限重试到 recursion_limit。实测 6 次重试烧掉 100 秒,
+# 端到端表现为 "/plan 11 分钟不返回"。
+# 这类失败在源头挡掉最划算:把"长得像 JSON 的字符串"还原成对象/数组。
+
+
+def _coerce_json_container(value: Any) -> Any:
+    """把 JSON 字符串还原成对象/数组;其它输入原样返回。"""
+    if isinstance(value, str):
+        text = value.strip()
+        if text[:1] in ("{", "["):
+            with contextlib.suppress(ValueError):
+                return json.loads(text)
+    return value
+
+
+def _coerce_location(value: Any) -> Any:
+    """兼容坐标的三种写法:对象 / JSON 字符串 / ``"lng,lat"`` 字符串。"""
+    if isinstance(value, str):
+        text = value.strip()
+        if text[:1] == "{":
+            with contextlib.suppress(ValueError):
+                return json.loads(text)
+        parts = text.split(",")
+        if len(parts) == 2:
+            with contextlib.suppress(ValueError):
+                return {"longitude": float(parts[0]), "latitude": float(parts[1])}
+    return value
 
 
 # ============ 请求模型 ============
@@ -81,6 +116,11 @@ class Location(BaseModel):
     longitude: float = Field(..., description="经度")
     latitude: float = Field(..., description="纬度")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_string_forms(cls, data: Any) -> Any:
+        return _coerce_location(data)
+
 
 class Attraction(BaseModel):
     """景点信息"""
@@ -96,6 +136,11 @@ class Attraction(BaseModel):
     image_url: Optional[str] = Field(default=None, description="图片URL")
     ticket_price: int = Field(default=0, description="门票价格(元)")
 
+    @field_validator("photos", mode="before")
+    @classmethod
+    def _accept_json_photos(cls, v: Any) -> Any:
+        return _coerce_json_container(v)
+
 
 class Meal(BaseModel):
     """餐饮信息"""
@@ -105,6 +150,11 @@ class Meal(BaseModel):
     location: Optional[Location] = Field(default=None, description="经纬度坐标")
     description: Optional[str] = Field(default=None, description="描述")
     estimated_cost: int = Field(default=0, description="预估费用(元)")
+
+    @field_validator("location", mode="before")
+    @classmethod
+    def _accept_string_location(cls, v: Any) -> Any:
+        return _coerce_location(v)
 
 
 class Hotel(BaseModel):
@@ -118,6 +168,11 @@ class Hotel(BaseModel):
     type: str = Field(default="", description="酒店类型")
     estimated_cost: int = Field(default=0, description="预估费用(元/晚)")
 
+    @field_validator("location", mode="before")
+    @classmethod
+    def _accept_string_location(cls, v: Any) -> Any:
+        return _coerce_location(v)
+
 
 class DayPlan(BaseModel):
     """单日行程"""
@@ -129,6 +184,11 @@ class DayPlan(BaseModel):
     hotel: Optional[Hotel] = Field(default=None, description="推荐酒店")
     attractions: List[Attraction] = Field(default=[], description="景点列表")
     meals: List[Meal] = Field(default=[], description="餐饮列表")
+
+    @field_validator("hotel", "attractions", "meals", mode="before")
+    @classmethod
+    def _accept_json_containers(cls, v: Any) -> Any:
+        return _coerce_json_container(v)
 
 
 class WeatherInfo(BaseModel):
@@ -173,6 +233,12 @@ class TripPlan(BaseModel):
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
     overall_suggestions: str = Field(..., description="总体建议")
     budget: Optional[Budget] = Field(default=None, description="预算信息")
+
+    @field_validator("days", "weather_info", "budget", mode="before")
+    @classmethod
+    def _accept_json_containers(cls, v: Any) -> Any:
+        """模型把 days/weather_info/budget 写成 JSON 字符串时的兜底(实测必现)。"""
+        return _coerce_json_container(v)
 
 
 class TripPlanResponse(BaseModel):
