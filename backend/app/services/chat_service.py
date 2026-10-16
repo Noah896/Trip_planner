@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
@@ -73,6 +74,45 @@ class ChatDecision(BaseModel):
             return [text]
         return value
 
+    @field_validator("intent", mode="before")
+    @classmethod
+    def _normalize_intent(cls, value: Any) -> Any:
+        """容忍大小写、空格和多余修饰(``"Plan"`` / ``"plan意图"``)。"""
+        if isinstance(value, str):
+            text = value.strip().lower()
+            for name in ("plan", "clarify", "chat"):
+                if name in text:
+                    return name
+        return value
+
+    @field_validator("travel_days", mode="before")
+    @classmethod
+    def _coerce_days(cls, value: Any) -> Any:
+        """把 ``"3 天"`` / ``"三天"`` / ``3.0`` 这类写法收敛成整数。
+
+        这个字段声明的是 int,但模型实测会给字符串。**校验一失败,LangChain 就会
+        让模型重试,而模型往往把同样的参数原样再发一遍,一路撞到 recursion_limit**
+        —— 实测真的撞出过 ``GraphRecursionError``(见 AGENTS.md)。
+        拿不准就返回 None,交给"信息不全 → 追问"那条路,比硬失败好。
+        """
+        if value is None or isinstance(value, int):
+            return value
+        if isinstance(value, float) and float(value).is_integer():
+            return int(value)
+        if isinstance(value, str):
+            text = value.strip()
+            digits = re.search(r"\d+", text)
+            if digits:
+                return int(digits.group())
+            chinese = {
+                "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+                "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+            }
+            for char, number in chinese.items():
+                if char in text:
+                    return number
+        return None
+
 
 CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。用户会用自然语言提需求,
 你的任务是判断该做什么、把规划需要的信息抽出来,并给用户一句自然的回应。
@@ -81,6 +121,15 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 - `plan`:信息够了,可以直接生成行程(至少要有城市 + 一段明确时间)
 - `clarify`:缺关键信息,需要追问(最常见的是没说什么时候去、去几天)
 - `chat`:用户在闲聊、或问一次性问题(如"你能做什么""介绍一下你自己")
+
+**范围约束(重要,必须遵守):**
+
+1. **默认只推荐中国大陆的目的地和景点。** 本服务的数据源是高德地图,
+   它**只覆盖中国大陆** —— 境外的酒店、天气、路线都查不到真实数据。
+2. 用户**明确要求境外**时(如"去日本""推荐东京的景点"),**不要凭自己的记忆推荐**。
+   要如实说明"本服务的数据源只覆盖中国大陆,提供不了境外行程的真实数据",
+   并问他是否换成国内城市。这种情况 intent 用 `chat`。
+3. **用户没说城市时,不要自己挑一个城市**(更不要挑一个境外的),应该追问。
 
 **抽取规则:**
 1. **你只负责"转述",不负责"算日期"** —— 这是硬性要求:
@@ -215,19 +264,44 @@ def build_trip_request(decision: ChatDecision) -> Optional[TripRequest]:
 async def decide(
     message: str, history: Sequence[ChatMessage], *, today: Optional[date] = None
 ) -> ChatDecision:
-    """判断意图并抽取槽位(**一次**模型调用)。"""
-    agent = _get_router_agent()
-    result = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": _format_context(message, history, today or date.today())}]},
-        config={"recursion_limit": get_settings().agent_recursion_limit},
-    )
+    """判断意图并抽取槽位(**一次**模型调用)。
 
-    structured = result.get("structured_response")
-    if isinstance(structured, ChatDecision):
-        return structured
-    if structured is not None:
-        return ChatDecision.model_validate(structured)
-    raise RuntimeError("意图识别没有返回结构化结果")
+    失败时**不抛异常**:退化成一次追问。理由见下面的 ``except`` ——
+    意图识别挂掉不该让整轮对话变成一条报错,用户看到的应该是一句"我再问一次"。
+    """
+    agent = _get_router_agent()
+    try:
+        result = await agent.ainvoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": _format_context(message, history, today or date.today()),
+                    }
+                ]
+            },
+            config={"recursion_limit": get_settings().agent_recursion_limit},
+        )
+
+        structured = result.get("structured_response")
+        if isinstance(structured, ChatDecision):
+            return structured
+        if structured is not None:
+            return ChatDecision.model_validate(structured)
+        raise RuntimeError("意图识别没有返回结构化结果")
+    except Exception as exc:  # noqa: BLE001
+        # 结构化输出失败时,模型会把同样的参数重发,一路撞到 recursion_limit
+        # (实测撞出过 GraphRecursionError)。这时候把错误抛给用户没有意义 ——
+        # 他既看不懂,也没法处理。退化成追问,让他换个说法再说一遍。
+        print(f"⚠️  意图识别失败({type(exc).__name__}: {exc}),退化成追问")
+        return ChatDecision(
+            intent="clarify",
+            reply=(
+                "抱歉,我刚才没太理解。你可以直接告诉我:想去哪个城市、大概什么时候出发、玩几天,"
+                "比如「北京玩三天,下周末出发」。"
+            ),
+            missing=["目的地", "出发日期"],
+        )
 
 
 async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:

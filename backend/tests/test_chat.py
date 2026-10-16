@@ -118,6 +118,61 @@ class TestDecisionTolerance:
         decision = ChatDecision.model_validate({"intent": "chat", "preferences": ""})
         assert decision.preferences == []
 
+    @pytest.mark.parametrize("raw", ["3", "3天", "3 天", "三天", 3.0, 3])
+    def test_travel_days_is_coerced_to_int(self, raw):
+        """模型实测会把天数写成 "三天" 这类字符串 —— 校验失败会让它一直重试。"""
+        decision = ChatDecision.model_validate({"intent": "plan", "travel_days": raw})
+        assert decision.travel_days == 3
+
+    def test_unparseable_days_becomes_none(self):
+        """读不出来就交给"信息不全→追问",不要硬失败。"""
+        decision = ChatDecision.model_validate({"intent": "plan", "travel_days": "看情况"})
+        assert decision.travel_days is None
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [("plan", "plan"), ("Plan", "plan"), (" plan ", "plan"), ("clarify", "clarify"), ("chat", "chat")],
+    )
+    def test_intent_is_normalized(self, raw, expected):
+        decision = ChatDecision.model_validate({"intent": raw, "reply": "x"})
+        assert decision.intent == expected
+
+
+class TestScopeConstraints:
+    """用户要求:没有特别说明时只要国内的景点。"""
+
+    def test_chat_prompt_says_china_mainland_only(self):
+        prompt = chat_service.CHAT_SYSTEM_PROMPT
+        assert "只覆盖中国大陆" in prompt
+        # 明确要求境外时不要凭记忆编
+        assert "不要凭自己的记忆推荐" in prompt
+        # 也不许自己挑一个城市
+        assert "不要自己挑一个城市" in prompt
+
+    def test_planner_prompt_says_use_only_retrieved_data(self):
+        from app.agents.trip_planner_agent import PLANNER_AGENT_PROMPT
+
+        assert "只能用上面提供的信息" in PLANNER_AGENT_PROMPT
+        assert "只覆盖**中国大陆**" in PLANNER_AGENT_PROMPT
+
+
+class TestDecideFallback:
+    def test_router_failure_degrades_to_asking_instead_of_raising(self, monkeypatch):
+        """实测撞过 GraphRecursionError:结构化输出失败时模型会一直重发同样参数。
+        这种情况下不该把错误抛给用户,而应该退化成一次追问。"""
+
+        class _BoomAgent:
+            async def ainvoke(self, payload, config=None):
+                raise RuntimeError("Recursion limit of 12 reached")
+
+        monkeypatch.setattr(chat_service, "_get_router_agent", lambda: _BoomAgent())
+
+        decision = asyncio.run(chat_service.decide("给我推荐几个景点", []))
+
+        assert decision.intent == "clarify"
+        assert decision.reply  # 给用户一句能看懂的话
+        assert decision.missing
+
 
 class TestFormatContext:
     def test_includes_today_history_and_latest(self):
