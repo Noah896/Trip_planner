@@ -14,6 +14,7 @@
 | 跑测试(离线,不花额度) | `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 -m pytest -q` |
 | 隔离诊断耗时(见第 4 节,`tool`/`detail`/`retrieval` 都不花额度) | `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\diag_p0_latency.py --stages tool,retrieval,planner` |
 | 验证流式端点(**会花 1 次模型额度**) | 先起后端,再 `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\check_stream.py` |
+| 验证聊天入口(**约 3 次模型额度**) | 先起后端,再 `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\check_chat.py` |
 | 一键启动前后端 | `powershell -ExecutionPolicy Bypass -File scripts\dev.ps1` |
 | 端口 | 后端 8000 · 前端 5173 · 常驻高德 MCP Server 8001 |
 
@@ -85,14 +86,17 @@ Get-Process -Name python,uvx,uv -ErrorAction SilentlyContinue
 
 ## 3. 架构与关键文件
 
-一次请求的链路。两个端点共用同一张图,区别只在"什么时候告诉你":
+**三种入口、一条流水线。** 表单和聊天最终都跑同一套检索 + 规划:
 
 ```
-POST /api/trip/plan          → 跑完整条链路再一次性返回
-POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE 进度
+POST /api/trip/plan          → 表单直通:跑完整条链路再一次性返回
+POST /api/trip/plan/stream   → 表单直通 + SSE 进度
+POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同一条流水线
 ```
 
 ```
+  └─ 聊天入口 services/chat_service.py
+  │    (一次模型调用同时给出:意图 + 槽位 + 回复;给了 trip 就跳过这一步)
   └─ agents/trip_planner_agent.py  plan_trip_with_status() / plan_trip_stream()
        └─ LangGraph StateGraph
             ├─ search_attractions ─┐
@@ -109,6 +113,7 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 | --- | --- |
 | LangGraph 编排 / 规划 Agent / 兜底 | `app/agents/trip_planner_agent.py` |
 | 三路检索(确定性,不经过模型) | `app/services/trip_retrieval.py` |
+| 聊天入口(意图 + 槽位 + 事件流) | `app/services/chat_service.py` |
 | 流式进度(SSE 端点 + 前端消费) | `app/api/routes/trip.py` · `frontend/src/views/Home.vue` |
 | 高德 MCP 连接与常驻 Server 生命周期 | `app/services/amap_mcp.py` |
 | LLM 客户端(含 thinking 开关) | `app/services/llm_service.py` |
@@ -120,6 +125,41 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 ---
 
 ## 4. 进度日志
+
+### 2026-10-16(第五轮:聊天式入口的后端,两个入口共用一条流水线)
+
+用户要的是"聊天式"入口,**和现有表单入口并重**(不是替换),聊天里要把
+LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成卡片,形态类似现在的结果页。
+
+本轮先把**后端**做完(能 pytest 全覆盖、还能真跑一遍验证),前端的聊天页与卡片组件
+留给下一轮 —— 因为前端的验证条件弱(只能 build,不能目视),先把契约定下来更稳。
+
+1. **新增 `app/services/chat_service.py`**:
+   - `ChatDecision` 是**扁平**结构(意图 + 槽位 + 回复 + 缺什么),一次模型调用全给出来。
+     扁平是有意的:嵌套对象正是第二轮踩过的坑(模型把嵌套对象写成 JSON 字符串,
+     校验失败后原样重发,重试到 recursion_limit)。
+   - 槽位拼装是**确定性**的(`build_trip_request`),模型没给的日期绝不替它编。
+   - 规划完全复用 `plan_trip_stream()`,所以降级判断、超时闸门、SSE 进度都不用重写。
+2. **新增 `POST /api/chat/stream`**,事件类型:`message` / `progress` /
+   `artifact`(kind=`trip_plan`,带整份行程数据 + 解析出的条件)/ `done` / `error`。
+3. **两个入口的接缝**:`ChatRequest.trip` 给了就直接进流水线,**跳过意图识别**,
+   一次模型调用都不额外花 —— 表单页就是走这条。
+4. **新增 `scripts/check_chat.py`**:两轮对话验证(先追问、补信息后出行程),
+   并且会**校验天数** —— 它当场抓出了一个真 bug(见下)。
+
+**本轮抓到的 bug(值得记下来)**:第一版提示词让模型自己推返程日期,
+实测它把"三天"算成了 start+1,于是解析出 2 天、**行程真的只生成了 2 天**,
+而它嘴上还说"好的,北京 3 天"(见 `check_chat.py` 第一版输出)。
+根因很典型:**又让模型去做确定性代码能做的事了**。改法是把推导从模型手里拿走 ——
+提示词明确"只转述、不算日期":用户说返程日才填 `end_date`,说时长只填 `travel_days`,
+其余交给 `build_trip_request()` 推。改完复跑:10-24 ~ 10-26,**3 天**,与用户所说一致。
+
+测试 95 → **122 全绿**(新增 `tests/test_chat.py`,含这个 bug 的回归用例)。
+
+**下一轮(前端)**:`TripPlanView.vue`(只读紧凑卡片)+ `Chat.vue`(消息流 + 输入框)+ 路由。
+注意:**不要再照搬 `Result.vue`** —— 它是 1410 行的整页组件,`<style scoped>` 有 480 行,
+而且导出功能靠 `.attraction-card` / `.hotel-card` / `#amap-container` 这些 class 名做 DOM 查询,
+搬动它会牵连导出和地图。聊天卡片按独立组件写(自己带样式),`Result.vue` 保持不动。
 
 ### 2026-10-16(第四轮:流式进度,干等 57 秒 → 第 9 秒就有反馈)
 
@@ -317,6 +357,13 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 
 ### P0 · 记忆系统(当前主线)
 
+> **2026-10-16 追加**:用户要求增加**聊天式入口**(与表单入口**并重**,不是替换),
+> 并且聊天里要把 LLM 返回的行程数据(天气 / 景点 / 酒店 / 预算)渲染成卡片,
+> 形态类似现在的结果页。这正好落在"什么时候才需要 LLM 意图识别"那个条件上,
+> 所以路由从"纯确定性"升级为"**一次调用同时产出 意图 + 槽位 + 回复**"(仍然只有一次)。
+> **后端已完成**(见第五轮日志),前端待做 —— 下一步就是它。
+> 记忆的三步计划不变,只是第 1 步(refine)以后可以直接接在聊天入口上。
+
 **要解决的三件事**(其它都是"为了像记忆系统而做记忆"):
 
 1. 会话内多轮改行程:"把第二天换成博物馆" —— 不用重填整个表单;
@@ -426,6 +473,20 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 
 > 提示:提交后如果又改了代码,记得在**提交前**回来更新本节,别让这里和仓库状态对不上。
 
+### 第五轮(聊天式入口后端)
+
+```
+ M backend/AGENTS.md                          # 第 1/3/4/5/6 节
+ M backend/app/api/main.py                    # 注册 /api/chat 路由
+ M backend/app/models/schemas.py              # 新增 ChatMessage / ChatRequest
+?? backend/app/api/routes/chat.py             # 新增:POST /api/chat/stream (SSE)
+?? backend/app/services/chat_service.py       # 新增:意图+槽位一次调用、事件流
+?? backend/scripts/check_chat.py              # 新增:两轮对话验证(含天数回归检查)
+?? backend/tests/test_chat.py                 # 新增:26 个用例
+```
+
+`pytest` **122 全绿**;真实两轮对话验证通过(先追问 → 补信息 → **3 天**行程,`degraded=false`)。
+
 ### 第四轮(流式进度,已提交)
 
 ```
@@ -473,4 +534,3 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 
 改动同样用 `git diff` 逐行核对过,`pytest` **72 全绿**(上一轮 61 + 新增 11),
 并且真实跑通了两次全链路(`degraded=false`)。
-

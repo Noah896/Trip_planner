@@ -2,7 +2,7 @@
 
 import contextlib
 import json
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from datetime import date
 
@@ -306,4 +306,44 @@ class ErrorResponse(BaseModel):
     success: bool = Field(default=False, description="是否成功")
     message: str = Field(..., description="错误消息")
     error_code: Optional[str] = Field(default=None, description="错误代码")
+
+
+# ============ 聊天式入口 ============
+
+
+class ChatMessage(BaseModel):
+    """一条对话消息(只用于把上下文喂给意图识别)。"""
+
+    role: Literal["user", "assistant"] = Field(..., description="谁说的")
+    content: str = Field(default="", description="内容")
+
+
+class ChatRequest(BaseModel):
+    """聊天式规划的请求体。
+
+    两种用法:
+
+    1. **自然语言**(聊天页):只给 ``message``(可带 ``history``),由后端判断意图、
+       抽取槽位,信息够了就直接生成行程;
+    2. **结构化直传**(表单页):直接给 ``trip``,此时**跳过意图识别**,
+       一次模型调用都不额外花 —— 这就是"两个入口共用一套流水线"的接缝。
+    """
+
+    message: str = Field(default="", description="用户这句话", examples=["北京玩三天,带小孩"])
+    history: List[ChatMessage] = Field(
+        default_factory=list, description="之前的对话(用于补全条件,建议不超过 10 条)"
+    )
+    trip: Optional[TripRequest] = Field(
+        default=None,
+        description="已经填好的结构化请求。给了它就跳过意图识别,直接进规划流水线",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "message": "帮我规划北京三日游,下周末出发,带个六岁小孩",
+                "history": [],
+            }
+        }
+    )
 
