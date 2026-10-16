@@ -315,31 +315,75 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 
 ## 5. 下一步
 
-### P0 · 从 40~57 秒继续往下压(剩下的全在那"一次模型调用"上)
+### P0 · 记忆系统(当前主线)
 
-三路检索是确定性调用(0 次模型),整条链路**只剩 1 次模型调用**,
-而这一次就要 25~30 秒 —— 这是 ModelScope 单次生成的固有延迟,不是编排问题。
-**"干等"这件事第四轮已经修掉了**(SSE 流式进度),剩下的是真耗时:
+**要解决的三件事**(其它都是"为了像记忆系统而做记忆"):
 
-1. **结果级缓存**(推荐下一个做):同一 (city, preferences, 日期, 住宿) 直接复用上次的
-   `TripPlan`(带 TTL)。这是唯一能把**重复请求**压进秒级的手段,演示效果也最直观。
-2. **缩小输出体积**:`TripPlan` 结构偏大(每天酒店 + 三餐 + 2~3 景点 + 预算)。
+1. 会话内多轮改行程:"把第二天换成博物馆" —— 不用重填整个表单;
+2. 跨会话记住偏好:"我不吃辣""带小孩" 下次规划自动生效;
+3. 复用历史行程:"照上次去北京那次的风格再来一份"。
+
+**已定的四个设计决策**(2026-10-16):
+
+| 决策 | 结论 | 为什么不选另一个 |
+| --- | --- | --- |
+| 分类路由 | **要,但先用确定性的** | 意图是这个产品的**请求结构的函数**(带没带 session_id、有没有追加要求),不需要 LLM 猜。上 LLM 分类器会把刚压到 1 次的模型调用立刻变成 2 次。等做"自由聊天入口"时再补关键词兜底 + LLM 兜底 |
+| 长期偏好召回 | **全量注入,不做向量召回** | 单用户偏好就几条到几十条,全塞进提示词比 top-k 更准也更可解释。"不吃辣"被向量召回漏掉是事故 |
+| 历史行程召回 | **先结构化过滤**(user_id + city + 时间倒序 + 偏好交集),向量留到给不出候选时 | 现在单用户就几条历史,向量毫无收益,却要引入 embedding 模型下载 + 新依赖 |
+| 记忆写入 | **复用那次规划调用回填 + 规则抽取,不新增调用**;且只记用户**显式说过**的 | 单独做"记忆抽取"会多一次模型调用;从行程内容反推偏好会让记忆自我污染、越用越偏 |
+
+**分层**(借课程那套 working/episodic/semantic 的说法,但落到本项目实处):
+
+- **working 工作记忆**:本次规划的中间态(三路检索结果 + 上一版 TripPlan + 对话轮次),
+  按 `session_id` **精确取,不做检索**。
+- **episodic 情景记忆**:历次规划(请求 + TripPlan + 时间)。结构化过滤取最近相关的几条。
+- **semantic 语义记忆**:用户偏好画像。**全量注入**,并且带**出处**(是哪次输入说的)。
+- **perceptual 感知记忆:不做** —— 本项目输入只有表单和文本,没有多模态来源。
+
+**存储**:标准库 `sqlite3` 三张表(`memory_preferences` / `trip_history` / `session_state`),
+**零新依赖**。不用 LangGraph checkpointer:我们的图是"表单 → 三路检索 → 规划"的
+**单向流水线**,不是长驻对话图;`langgraph-checkpoint-sqlite` 还得额外装包。
+等真要做多轮 agent 时再换。
+
+**分三步落地**(每步独立可验证、独立提交):
+
+1. **会话内 refine**:`TripRequest` 加可选 `session_id` / `user_id`(不传 = 现在的无状态行为);
+   带 session_id + 追加要求就走"基于上一版改",仍然复用 `/plan` 一个端点。
+2. **长期偏好**:规则抽取 + 让规划顺手回填 `detected_preferences` → 全量注入提示词;
+   加 `GET/DELETE /api/memory/{user_id}` 管理接口(隐私需要);响应带 `used_memory`。
+3. **情景记忆召回**:结构化过滤取最近相关行程,拼进提示词。
+
+> RAG 知识库继续往后排(见本节末尾"明确不要做")。
+
+### P1 · 结果级缓存 —— 已按要求标记延后
+
+同一 (city, preferences, 日期, 住宿) 直接复用上次的 `TripPlan`(带 TTL)。
+这是唯一能把**重复请求**压进秒级的手段 —— 但 2026-10-16 用户明确说
+"留着以后优化的时候做",所以先标记在这里,等记忆系统做完再回来。
+
+### P2 · 其它优化(原 P0 剩下的)
+
+三路检索是确定性调用(0 次模型),整条链路**只剩 1 次模型调用**,而这一次就要
+25~30 秒 —— 这是 ModelScope 单次生成的固有延迟。"干等"第四轮已经修掉了(SSE),
+剩下的都是真耗时:
+
+1. **缩小输出体积**:`TripPlan` 结构偏大(每天酒店 + 三餐 + 2~3 景点 + 预算)。
    若接受"预算 / 餐食由服务层兜底",模型输出能明显变短,生成时间跟着下降。
-3. **换更快的模型**:同一份提示词换个更小更快的模型量一次,就知道差距有多大。
-4. (可选)**把规划也做到 token 级流式**:现在 SSE 只到节点级,生成那 30 秒里
+2. **换更快的模型**:同一份提示词换个更小更快的模型量一次,就知道差距有多大。
+3. (可选)**把规划也做到 token 级流式**:现在 SSE 只到节点级,生成那 30 秒里
    只有计时器在动。要逐字输出就得让结构化输出改成增量解析,复杂度高不少。
 
 > 诊断工具已经就位:`--stages tool,detail,retrieval` **完全不花额度**;
 > 流式端点用 `scripts/check_stream.py` 验证(花 1 次模型额度)。
 
-### P1 · 坐标回填 —— ✅ 已完成(第三轮)
+### ✅ 已完成:坐标回填(第三轮)
 
 - `maps_text_search` 返回的 POI **不含坐标**(复测 20 条 `location` 全空),
   `maps_search_detail(poi_id)` 能拿到真坐标。
 - 现在由 `app/services/trip_retrieval.py` 在**服务层固定回填**,
   不再依赖"模型记得去查";顺带把 `rating` / `opentime` / 门票也带了进来。
 
-### P2 · 工程化
+### P3 · 工程化
 
 > 原本有一份 `NEXT_STEPS_CHECKLIST.md` 和一份 `BACKEND_REVIEW_AND_OPTIMIZATION.md`
 > 写着更细的路线图,按用户要求已删除(历史版本仍能从 git 里翻出来)。
@@ -349,7 +393,6 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 - **真实依赖健康检查**:现在只查 key 存不存在,应实际 ping 一次 MCP / LLM。
 - **限流 + 并发背压**:一个 `/plan` 会 fan-out 出 3 个检索 Agent,每个又多次调工具。
 - **成本护栏**:按调用量 / token 统计,设单用户日配额(直接关系到额度被刷爆)。
-- **结果级缓存**:相同 `TripRequest` 命中缓存直返(TTL);POI / 天气也可做服务级缓存。
 - **接口鉴权与配额**:`/api/trip/plan` 目前无鉴权,任何人都能拿来刷你的额度。
 - **可观测性**:接入 LangSmith / Langfuse,追踪工具调用、token、耗时。
 - **评测集**:城市 × 偏好的 golden cases,度量 JSON 合法率、端到端时延、兜底率。
@@ -360,7 +403,10 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 
 ### 明确不要做
 
-**在单轮请求都还没跑通之前,不要动记忆 / RAG。**
+- **RAG 知识库**:等记忆系统做完再说(先把"记住人"做扎实,再谈"记住知识")。
+- **感知记忆 / 知识图谱 / Qdrant**:课程里那套完整架构对本项目过重,且没有需求来源。
+- ~~在单轮请求跑通之前不要动记忆~~:**这条已经解除** —— 单轮请求 2026-10-16 跑通
+  (`degraded=false`、57s、SSE 流式),现在正是做记忆的时候。
 
 ---
 
@@ -379,23 +425,6 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 改动都用 `git diff` 逐行核对过,提交前测试全绿。
 
 > 提示:提交后如果又改了代码,记得在**提交前**回来更新本节,别让这里和仓库状态对不上。
-
-### 第二轮(端到端跑通,已提交 `16a3d3f` / `ad7c18d`)
-
-```
- M backend/AGENTS.md                        # 本节 + 第 4/5 节
- M backend/.env.example                     # 新增 LLM_MAX_TOKENS / AGENT_RECURSION_LIMIT / PLAN_TOTAL_TIMEOUT 说明
- M backend/app/agents/trip_planner_agent.py # recursion_limit + 总时长闸门 + root_cause 报错 + 瞬时失败重试
- M backend/app/config.py                    # 新增 agent_recursion_limit / plan_total_timeout / llm_max_tokens
- M backend/app/models/schemas.py            # 嵌套结构 JSON 字符串容错(本轮核心修复)
- M backend/app/services/llm_service.py      # 可选的 max_tokens
- M backend/tests/test_degradation.py        # 假图签名适配 + 总时长超时降级用例
-?? backend/scripts/diag_p0_latency.py       # 新增:隔离诊断脚本
-?? backend/tests/test_schema_tolerance.py   # 新增:结构化输出容错用例
-```
-
-改动同样用 `git diff` 逐行核对过,`pytest` **72 全绿**(上一轮 61 + 新增 11),
-并且真实跑通了两次全链路(`degraded=false`)。
 
 ### 第四轮(流式进度,已提交)
 
@@ -428,3 +457,20 @@ POST /api/trip/plan/stream   → 同一份结果,每完成一步推一条 SSE �
 ```
 
 `pytest` **85 全绿**;真实全链路 57.5s / `degraded=false`(改造前 63.9~112.1s)。
+### 第二轮(端到端跑通,已提交 `16a3d3f` / `ad7c18d`)
+
+```
+ M backend/AGENTS.md                        # 本节 + 第 4/5 节
+ M backend/.env.example                     # 新增 LLM_MAX_TOKENS / AGENT_RECURSION_LIMIT / PLAN_TOTAL_TIMEOUT 说明
+ M backend/app/agents/trip_planner_agent.py # recursion_limit + 总时长闸门 + root_cause 报错 + 瞬时失败重试
+ M backend/app/config.py                    # 新增 agent_recursion_limit / plan_total_timeout / llm_max_tokens
+ M backend/app/models/schemas.py            # 嵌套结构 JSON 字符串容错(本轮核心修复)
+ M backend/app/services/llm_service.py      # 可选的 max_tokens
+ M backend/tests/test_degradation.py        # 假图签名适配 + 总时长超时降级用例
+?? backend/scripts/diag_p0_latency.py       # 新增:隔离诊断脚本
+?? backend/tests/test_schema_tolerance.py   # 新增:结构化输出容错用例
+```
+
+改动同样用 `git diff` 逐行核对过,`pytest` **72 全绿**(上一轮 61 + 新增 11),
+并且真实跑通了两次全链路(`degraded=false`)。
+
