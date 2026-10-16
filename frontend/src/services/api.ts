@@ -1,5 +1,12 @@
 import axios from 'axios'
-import type { TripFormData, TripPlanResponse, TripStreamEvent, TripProgressEvent } from '@/types'
+import type {
+  ChatEvent,
+  ChatTurn,
+  TripFormData,
+  TripPlanResponse,
+  TripProgressEvent,
+  TripStreamEvent
+} from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -36,41 +43,12 @@ apiClient.interceptors.response.use(
 )
 
 /**
- * 生成旅行计划
- */
-export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> {
-  try {
-    const response = await apiClient.post<TripPlanResponse>('/api/trip/plan', formData)
-    return response.data
-  } catch (error: any) {
-    console.error('生成旅行计划失败:', error)
-    throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
-  }
-}
-
-/**
- * 生成旅行计划(流式进度)
+ * 把一个 SSE 响应体按帧喂给回调。
  *
- * 返回值和 generateTripPlan 完全一样,区别是过程中会通过 onProgress 回调
- * 把**真实进度**推出来:每完成一步(景点检索 / 天气查询 / 酒店检索 / 生成行程)
- * 回调一次。这样前端就不用像以前那样拿 setInterval 假装进度了。
- *
- * 用 fetch + ReadableStream 手工解析 SSE —— axios 拿不到增量响应体。
+ * 为什么不用 EventSource:`/plan/stream` 和 `/chat/stream` 都是 POST,
+ * 而 EventSource 只支持 GET。所以用 fetch + ReadableStream 手工解析。
  */
-export async function generateTripPlanStream(
-  formData: TripFormData,
-  onProgress: (event: TripProgressEvent) => void
-): Promise<TripPlanResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/trip/plan/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(formData)
-  })
-
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '')
-    throw new Error(detail || `请求失败(${response.status})`)
-  }
+async function readSSE<T>(response: Response, onEvent: (event: T) => void): Promise<void> {
   if (!response.body) {
     throw new Error('当前浏览器不支持流式响应')
   }
@@ -78,7 +56,6 @@ export async function generateTripPlanStream(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  let result: TripPlanResponse | null = null
 
   while (true) {
     const { done, value } = await reader.read()
@@ -93,28 +70,110 @@ export async function generateTripPlanStream(
     for (const frame of frames) {
       const line = frame.split('\n').find((item) => item.startsWith('data:'))
       if (!line) continue
-
-      const event: TripStreamEvent = JSON.parse(line.slice(5).trim())
-
-      if (event.type === 'progress') {
-        onProgress(event)
-      } else if (event.type === 'result') {
-        result = {
-          success: event.success,
-          degraded: event.degraded,
-          message: event.message,
-          data: event.data
-        }
-      } else {
-        throw new Error(event.message || '生成旅行计划失败')
-      }
+      onEvent(JSON.parse(line.slice(5).trim()) as T)
     }
   }
+}
+
+async function postStream(path: string, body: unknown): Promise<Response> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(detail || `请求失败(${response.status})`)
+  }
+  return response
+}
+
+/**
+ * 生成旅行计划
+ */
+export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> {
+  try {
+    const response = await apiClient.post<TripPlanResponse>('/api/trip/plan', formData)
+    return response.data
+  } catch (error: any) {
+    console.error('生成旅行计划失败:', error)
+    throw new Error(error.response?.data?.detail || error.message || '生成旅行计划失败')
+  }
+}
+
+/**
+ * 生成旅行计划(流式进度,表单入口)
+ *
+ * 返回值和 generateTripPlan 完全一样,区别是过程中会通过 onProgress 回调
+ * 把**真实进度**推出来:每完成一步(景点检索 / 天气查询 / 酒店检索 / 生成行程)
+ * 回调一次。这样前端就不用像以前那样拿 setInterval 假装进度了。
+ */
+export async function generateTripPlanStream(
+  formData: TripFormData,
+  onProgress: (event: TripProgressEvent) => void
+): Promise<TripPlanResponse> {
+  const response = await postStream('/api/trip/plan/stream', formData)
+
+  let result: TripPlanResponse | null = null
+
+  await readSSE<TripStreamEvent>(response, (event) => {
+    if (event.type === 'progress') {
+      onProgress(event)
+    } else if (event.type === 'result') {
+      result = {
+        success: event.success,
+        degraded: event.degraded,
+        message: event.message,
+        data: event.data
+      }
+    } else if (event.type === 'error') {
+      throw new Error(event.message || '生成旅行计划失败')
+    }
+  })
 
   if (!result) {
     throw new Error('连接中断,未收到最终计划')
   }
   return result
+}
+
+export interface ChatStreamHandlers {
+  /** 助手说的一句话(追问 / 复述需求) */
+  onMessage?: (text: string) => void
+  /** 规划过程中的节点进度 */
+  onProgress?: (event: TripProgressEvent) => void
+  /** 结构化行程,渲染成卡片 */
+  onArtifact?: (event: Extract<ChatEvent, { type: 'artifact' }>) => void
+  /** 本轮结束;request 是后端解析出来的条件 */
+  onDone?: (request?: TripFormData) => void
+}
+
+/**
+ * 对话式规划(聊天入口)
+ *
+ * 只给 message(可带 history)时,后端会先判断意图、抽取条件:信息不够就追问,
+ * 够了就直接生成行程。若已经填好表单,可以直接传 trip —— 那样会跳过意图识别。
+ */
+export async function chatStream(
+  body: { message: string; history?: ChatTurn[]; trip?: TripFormData },
+  handlers: ChatStreamHandlers
+): Promise<void> {
+  const response = await postStream('/api/chat/stream', body)
+
+  await readSSE<ChatEvent>(response, (event) => {
+    if (event.type === 'message') {
+      handlers.onMessage?.(event.text)
+    } else if (event.type === 'progress') {
+      handlers.onProgress?.(event)
+    } else if (event.type === 'artifact') {
+      handlers.onArtifact?.(event)
+    } else if (event.type === 'done') {
+      handlers.onDone?.(event.request)
+    } else if (event.type === 'error') {
+      throw new Error(event.message || '对话式规划失败')
+    }
+  })
 }
 
 /**
@@ -131,4 +190,3 @@ export async function healthCheck(): Promise<any> {
 }
 
 export default apiClient
-

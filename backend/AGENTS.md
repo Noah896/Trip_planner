@@ -15,6 +15,7 @@
 | 隔离诊断耗时(见第 4 节,`tool`/`detail`/`retrieval` 都不花额度) | `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\diag_p0_latency.py --stages tool,retrieval,planner` |
 | 验证流式端点(**会花 1 次模型额度**) | 先起后端,再 `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\check_stream.py` |
 | 验证聊天入口(**约 3 次模型额度**) | 先起后端,再 `& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\check_chat.py` |
+| 浏览器里真验聊天页(**2~3 次模型额度**) | 起后端 + `npm run dev` + 无头 Edge(见 2.4),再跑 `scripts\check_chat_ui.py` |
 | 一键启动前后端 | `powershell -ExecutionPolicy Bypass -File scripts\dev.ps1` |
 | 端口 | 后端 8000 · 前端 5173 · 常驻高德 MCP Server 8001 |
 
@@ -82,6 +83,30 @@ Get-Process -Name python,uvx,uv -ErrorAction SilentlyContinue
 - 出网(调 ModelScope / 高德)需要提权。
 - `Get-CimInstance Win32_Process` 会被拒绝访问,查进程用 `Get-Process` / `netstat -ano`。
 
+### 2.4 前端相关的坑(2026-10-16 踩到)
+
+- **vite dev server 只监听 IPv6**:`npm run dev` 之后 `netstat` 显示的是
+  `[::1]:5173`,所以 `http://localhost:5173` 能通、`http://127.0.0.1:5173` **连不上**。
+  写探活/自动化时一律用 `localhost`。
+- **验证前端别只靠 `npm run build`**:它只能证明"类型和模板能编译"。
+  本机没有 Playwright/Puppeteer,但 **Edge 可以做无头验证**:
+
+  ```powershell
+  # 起一个带调试端口的无头 Edge
+  Start-Process -FilePath "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
+    -ArgumentList @("--headless=new","--disable-gpu","--remote-debugging-port=9222",
+                    "--user-data-dir=$env:TEMP\edge-codex","--no-first-run","about:blank") `
+    -WindowStyle Hidden
+  # 然后用 scripts\check_chat_ui.py(走 CDP)真打字、真点按钮、读回渲染结果
+  ```
+
+  用 `aiohttp` 就能连 CDP 的 WebSocket(它已在后端依赖里,**不用装 playwright**)。
+  注意:`--dump-dom` 在新版 headless 下没有输出,走 CDP 的 `Runtime.evaluate` 更可靠。
+- **别把 python 脚本从 PowerShell 管道喂给 `python -`**:中文会变成 `?`。
+  临时脚本用 `-c` 配 here-string,或者直接写成文件跑。
+- **`git commit -m` 里不要放英文双引号**:PowerShell 会把参数切开,
+  报 `pathspec ... did not match`。用中文引号「」或干脆不用引号。
+
 ---
 
 ## 3. 架构与关键文件
@@ -125,6 +150,39 @@ POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同�
 ---
 
 ## 4. 进度日志
+
+### 2026-10-16(第六轮:前端聊天页,两个入口并重)
+
+1. **新增 `frontend/src/views/Chat.vue`**(聊天页,路由 `/chat`):
+   - 消息流:用户气泡 / 助手气泡 / **进度清单**(⚪ 等待 → ⏳ 进行中 → ✅ 完成 + 各自耗时)
+     / **行程卡片**;空态给三个引导词,点一下填进输入框。
+   - 进度清单一开始就把四个阶段按"等待中"列出来 —— 否则前 10~20 秒界面看着像死了。
+   - 拿到 artifact 后可以把整份行程塞进 `sessionStorage` 并跳到结果页
+     (结果页的编辑 / 导出 / 地图都还在,聊天页不重复实现)。
+2. **新增 `frontend/src/components/TripPlanView.vue`**:只读紧凑行程卡片
+   (概览 / 天气 / 每日景点酒店餐饮 / 预算),自带 scoped 样式。
+   **特意没有去改 `Result.vue`**:它是 1410 行的整页组件,`<style scoped>` 有 480 行,
+   而且导出功能靠 `.attraction-card` / `.hotel-card` / `#amap-container` 这些 class 名
+   做 DOM 查询 —— 搬动 markup 会牵连导出与地图,而前端又没法目视回归。
+3. **两个入口并重**:首页表单下方加了「不想逐项填表?直接说一句就行 → 和助手聊聊」,
+   表单页本身一行未动。
+4. **`api.ts` 重写**:把 SSE 解析抽成共用的 `readSSE()`,新增 `chatStream()`
+   (两个 POST 端点都不能用 `EventSource`,它只支持 GET)。
+
+**验证方式(这轮换了打法)**:本机没有 Playwright,但用**无头 Edge + CDP** 真跑了一遍 ——
+新增 `scripts/check_chat_ui.py`:开浏览器、在输入框里模拟输入并派发 `input` 事件
+(Vue 的 v-model 靠这个才更新)、点发送、轮询 DOM、把渲染结果读回来。实测:
+
+```
+✅ 页面挂载成功: /chat  💬 直接和助手说你想怎么玩
+   +15s  ⚪ 景点检索 / ✅ 天气查询 9.2s / ⚪ 酒店检索 / ⚪ 生成行程   ← 进度是真的在动
+   +33s  ✅ 景点检索 26.2s / ✅ 天气查询 9.2s / ✅ 酒店检索 26.2s / ⏳ 生成行程
+   🤖 好的，北京3天，下周末（10月24日）出发，带6岁小孩，我这就为您规划亲子行程。
+📦 🗺️ 北京 3 日游 | 2026-10-24 ~ 2026-10-26 | 预估 ¥2680 | 3 天天气 | 每天景点/酒店/三餐
+```
+
+另外用 CDP 复查了首页:`.chat-entry` 存在、提交按钮和表单都还在(改 Home.vue 的回归检查)。
+`pytest` 122 全绿;`npm run build`(vue-tsc + vite)通过。
 
 ### 2026-10-16(第五轮:聊天式入口的后端,两个入口共用一条流水线)
 
@@ -361,8 +419,12 @@ LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成�
 > 并且聊天里要把 LLM 返回的行程数据(天气 / 景点 / 酒店 / 预算)渲染成卡片,
 > 形态类似现在的结果页。这正好落在"什么时候才需要 LLM 意图识别"那个条件上,
 > 所以路由从"纯确定性"升级为"**一次调用同时产出 意图 + 槽位 + 回复**"(仍然只有一次)。
-> **后端已完成**(见第五轮日志),前端待做 —— 下一步就是它。
-> 记忆的三步计划不变,只是第 1 步(refine)以后可以直接接在聊天入口上。
+> **前后端都已完成**(见第五、六轮日志)。
+>
+> **还差一步才算"有记忆"**:现在对话历史是**客户端每轮带上来**的
+> (`ChatRequest.history`),服务端不存;而且用户说"第二天换成博物馆"时,
+> 后端只会当作新需求重新抽槽位、重新规划 —— **没法基于上一版改**。
+> 所以下一步就是记忆三步方案里的第 1 步:**服务端会话 + refine**。
 
 **要解决的三件事**(其它都是"为了像记忆系统而做记忆"):
 
@@ -472,6 +534,22 @@ LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成�
 改动都用 `git diff` 逐行核对过,提交前测试全绿。
 
 > 提示:提交后如果又改了代码,记得在**提交前**回来更新本节,别让这里和仓库状态对不上。
+
+### 第六轮(前端聊天页)
+
+```
+ M backend/AGENTS.md                             # 第 1/2/4/6 节
+ M frontend/src/main.ts                          # 新增 /chat 路由
+ M frontend/src/services/api.ts                   # 抽出 readSSE(),新增 chatStream()
+ M frontend/src/types/index.ts                    # 聊天事件类型
+ M frontend/src/views/Home.vue                    # 表单页下方加聊天入口
+?? frontend/src/views/Chat.vue                    # 新增:聊天页
+?? frontend/src/components/TripPlanView.vue       # 新增:只读行程卡片
+?? backend/scripts/check_chat_ui.py               # 新增:无头 Edge + CDP 的 UI 验证
+```
+
+`npm run build` 通过;无头浏览器里真跑通了「输入 → 事件流 → 行程卡片」;
+首页表单回归检查通过。`Result.vue` **一行未动**。
 
 ### 第五轮(聊天式入口后端)
 

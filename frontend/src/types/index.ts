@@ -126,3 +126,47 @@ export interface TripStreamError {
 }
 
 export type TripStreamEvent = TripProgressEvent | TripStreamResult | TripStreamError
+
+// ---------- /api/chat/stream 的事件 ----------
+
+/** 助手说的一句话(追问 / 复述需求) */
+export interface ChatMessageEvent {
+  type: 'message'
+  text: string
+}
+
+/** 结构化行程:前端渲染成卡片,内容与结果页一致(天气 / 景点 / 酒店 / 预算) */
+export interface ChatArtifactEvent {
+  type: 'artifact'
+  kind: 'trip_plan'
+  degraded: boolean
+  reason?: string
+  message?: string
+  elapsed?: number
+  /** 后端解析出来的条件,后续"改行程"要用 */
+  request?: TripFormData
+  data: TripPlan
+}
+
+export interface ChatDoneEvent {
+  type: 'done'
+  request?: TripFormData
+}
+
+export interface ChatErrorEvent {
+  type: 'error'
+  message: string
+}
+
+export type ChatEvent =
+  | ChatMessageEvent
+  | TripProgressEvent
+  | ChatArtifactEvent
+  | ChatDoneEvent
+  | ChatErrorEvent
+
+/** 一轮对话里发给后端的上下文 */
+export interface ChatTurn {
+  role: 'user' | 'assistant'
+  content: string
+}

@@ -181,6 +181,14 @@
           </a-button>
         </a-form-item>
 
+        <!-- 另一个入口:聊天式(与表单并重) -->
+        <a-form-item v-if="!loading">
+          <div class="chat-entry">
+            <span class="chat-entry-text">不想逐项填表?直接说一句就行</span>
+            <a-button type="link" @click="goChat">💬 和助手聊聊 →</a-button>
+          </div>
+        </a-form-item>
+
         <!-- 加载进度(真实进度来自后端 SSE,不再是假动画) -->
         <a-form-item v-if="loading">
           <div class="loading-container">
@@ -328,6 +336,10 @@ watch([() => formData.start_date, () => formData.end_date], ([start, end]) => {
     }
   }
 })
+
+const goChat = () => {
+  router.push('/chat')
+}
 
 const handleSubmit = async () => {
   if (!formData.start_date || !formData.end_date) {
@@ -680,6 +692,22 @@ const handleSubmit = async () => {
 .button-icon {
   margin-right: 8px;
   font-size: 20px;
+}
+
+/* 聊天入口(与表单并重) */
+.chat-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #f5f7fa 0%, #ffffff 100%);
+  border: 2px dashed #667eea;
+  border-radius: 12px;
+}
+
+.chat-entry-text {
+  color: #667eea;
 }
 
 /* 加载容器 */
