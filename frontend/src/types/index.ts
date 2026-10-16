@@ -129,7 +129,7 @@ export type TripStreamEvent = TripProgressEvent | TripStreamResult | TripStreamE
 
 // ---------- /api/chat/stream 的事件 ----------
 
-/** 助手说的一句话(追问 / 复述需求) */
+/** 助手说的一句话。**text 是增量**:一次回复会被拆成很多条,前端按顺序追加 */
 export interface ChatMessageEvent {
   type: 'message'
   text: string

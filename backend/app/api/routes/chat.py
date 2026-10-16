@@ -26,7 +26,8 @@ router = APIRouter(prefix="/chat", tags=["对话式规划"])
         "用一句话开始规划:后端判断意图、抽取条件,信息够了就直接生成行程,"
         "不够就追问。整个过程以 SSE 推进度与结果。\n\n"
         "事件类型(每条都是 `data: <json>`,以空行分隔):\n"
-        '- `{"type":"message","text":"..."}` —— 给用户看的一句话(追问 / 复述需求)\n'
+        '- `{"type":"message","text":"..."}` —— 助手回复的**增量**'
+        "(同一句话会被拆成很多条,客户端按顺序追加)\n"
         '- `{"type":"progress","stage":...,"status":...}` —— 规划节点进度\n'
         '- `{"type":"artifact","kind":"trip_plan","data":{...}}` —— 结构化行程,前端渲染成卡片\n'
         '- `{"type":"done","request":{...}}` —— 本轮结束\n'

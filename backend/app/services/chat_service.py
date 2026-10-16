@@ -17,11 +17,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
-from langchain.agents import create_agent
 from pydantic import BaseModel, Field, field_validator
 
 from ..agents.trip_planner_agent import get_trip_planner_agent
@@ -188,27 +188,64 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 **missing 字段**:intent=clarify 时列出还缺的信息(中文,如 "出发日期"、"行程天数")。
 """
 
-_router_agent: Any = None
+# 意图识别用的模型:直接绑 ChatDecision 这个"工具"。
+#
+# 为什么不用 create_agent(和规划那一步不一样):
+#   1. 我们要的是**逐字流式**回话,而 create_agent 只在最后给完整结果;
+#   2. 更要紧的是,create_agent 在结构化输出校验失败时会**让模型重试**,
+#      而模型往往把同样的参数原样再发一遍,一路撞到 recursion_limit
+#      (实测撞出过 GraphRecursionError)。这里我们只调一次、自己解析、
+#      失败就退化成追问 —— 没有循环,也就没有撞上限这回事。
+_router_model: Any = None
 
 
-def _get_router_agent() -> Any:
-    """意图识别用的 Agent(单例,惰性构建)。"""
-    global _router_agent
-    if _router_agent is None:
-        _router_agent = create_agent(
-            model=get_llm(),
-            tools=[],
-            system_prompt=CHAT_SYSTEM_PROMPT,
-            response_format=ChatDecision,
-            name="chat_router",
-        )
-    return _router_agent
+def _get_router_model() -> Any:
+    global _router_model
+    if _router_model is None:
+        _router_model = get_llm().bind_tools([ChatDecision], tool_choice="required")
+    return _router_model
 
 
 def reset_router_agent() -> None:
     """重置单例(测试或重新配置时用)。"""
-    global _router_agent
-    _router_agent = None
+    global _router_model
+    _router_model = None
+
+
+# 从**还没写完**的 JSON 片段里抠出 reply 的当前值。
+# 模型的工具参数是按字段顺序吐的,而 reply 是第二个字段 —— 所以它出现得很早。
+_REPLY_PATTERN = re.compile(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)')
+
+
+def _decode_partial_string(fragment: str) -> str:
+    """把(可能被截断的)JSON 字符串片段解码成明文。
+
+    截断点可能正好落在半个转义序列上(比如末尾是 ``\\`` 或 ``\\u12``),
+    那就去掉最后 1~2 个字符再试。
+    """
+    for cut in range(3):
+        candidate = fragment if cut == 0 else fragment[:-cut]
+        try:
+            return json.loads('"' + candidate + '"')
+        except Exception:  # noqa: BLE001 - 截断导致的解析失败是常态
+            continue
+    return fragment
+
+
+def extract_reply(raw_args: str) -> str:
+    """取出 ``reply`` 字段到目前为止的值(可能还没写完)。"""
+    match = _REPLY_PATTERN.search(raw_args)
+    return _decode_partial_string(match.group(1)) if match else ""
+
+
+_FALLBACK_REPLY = (
+    "抱歉,我刚才没太理解。你可以直接告诉我:想去哪个城市、大概什么时候出发、玩几天,"
+    "比如「北京玩三天,下周末出发」。"
+)
+
+
+def _fallback_decision() -> ChatDecision:
+    return ChatDecision(intent="clarify", reply=_FALLBACK_REPLY, missing=["目的地", "出发日期"])
 
 
 def _format_context(message: str, history: Sequence[ChatMessage], today: date) -> str:
@@ -297,47 +334,76 @@ def build_trip_request(decision: ChatDecision) -> Optional[TripRequest]:
         return None
 
 
+async def decide_streaming(
+    message: str,
+    history: Sequence[ChatMessage],
+    *,
+    today: Optional[date] = None,
+    model: Any = None,
+) -> AsyncIterator[Dict[str, Any]]:
+    """判断意图、抽取槽位(**一次**模型调用),同时把回复逐字流出去。
+
+    产出两类事件(前端把 ``delta`` 追加到当前助手气泡里):
+
+    - ``{"delta": "北京三天…"}`` —— 助手回复的增量,可能有很多条;
+    - ``{"decision": ChatDecision, "streamed": "已经流出去的全文"}`` —— 恰好一条,在最后。
+
+    失败**不抛异常**:退化成一次追问,并把兜底话术也当增量吐出去,
+    免得用户看到半句话就没下文了。
+    """
+    router = model or _get_router_model()
+    payload = [
+        {"role": "system", "content": CHAT_SYSTEM_PROMPT},
+        {"role": "user", "content": _format_context(message, history, today or date.today())},
+    ]
+
+    raw_args = ""
+    streamed = ""
+
+    try:
+        async for chunk in router.astream(payload):
+            for piece in getattr(chunk, "tool_call_chunks", None) or []:
+                fragment = piece.get("args") or ""
+                if not fragment:
+                    continue
+                raw_args += fragment
+                current = extract_reply(raw_args)
+                if len(current) > len(streamed):
+                    yield {"delta": current[len(streamed) :]}
+                    streamed = current
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  意图识别流式中断({type(exc).__name__}: {exc})")
+
+    decision: Optional[ChatDecision] = None
+    if raw_args:
+        try:
+            decision = ChatDecision.model_validate(json.loads(raw_args))
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️  意图识别结果解析失败({type(exc).__name__}: {exc}),退化成追问")
+
+    if decision is None:
+        decision = _fallback_decision()
+
+    # 把"最终决定要说的"和"已经流出去的"对齐:少了的补上,不看半句、也不重复。
+    reply = decision.reply or ""
+    if len(reply) > len(streamed):
+        yield {"delta": reply[len(streamed) :]}
+        streamed = reply
+    elif len(reply) < len(streamed):
+        print(f"⚠️  流出去的内容比最终 reply 长({len(streamed)} > {len(reply)}),以最终为准")
+
+    yield {"decision": decision, "streamed": reply}
+
+
 async def decide(
     message: str, history: Sequence[ChatMessage], *, today: Optional[date] = None
 ) -> ChatDecision:
-    """判断意图并抽取槽位(**一次**模型调用)。
-
-    失败时**不抛异常**:退化成一次追问。理由见下面的 ``except`` ——
-    意图识别挂掉不该让整轮对话变成一条报错,用户看到的应该是一句"我再问一次"。
-    """
-    agent = _get_router_agent()
-    try:
-        result = await agent.ainvoke(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": _format_context(message, history, today or date.today()),
-                    }
-                ]
-            },
-            config={"recursion_limit": get_settings().agent_recursion_limit},
-        )
-
-        structured = result.get("structured_response")
-        if isinstance(structured, ChatDecision):
-            return structured
-        if structured is not None:
-            return ChatDecision.model_validate(structured)
-        raise RuntimeError("意图识别没有返回结构化结果")
-    except Exception as exc:  # noqa: BLE001
-        # 结构化输出失败时,模型会把同样的参数重发,一路撞到 recursion_limit
-        # (实测撞出过 GraphRecursionError)。这时候把错误抛给用户没有意义 ——
-        # 他既看不懂,也没法处理。退化成追问,让他换个说法再说一遍。
-        print(f"⚠️  意图识别失败({type(exc).__name__}: {exc}),退化成追问")
-        return ChatDecision(
-            intent="clarify",
-            reply=(
-                "抱歉,我刚才没太理解。你可以直接告诉我:想去哪个城市、大概什么时候出发、玩几天,"
-                "比如「北京玩三天,下周末出发」。"
-            ),
-            missing=["目的地", "出发日期"],
-        )
+    """只要判断结果、不要流式时的便捷封装(测试和内部调用用)。"""
+    decision = _fallback_decision()
+    async for item in decide_streaming(message, history, today=today):
+        if "decision" in item:
+            decision = item["decision"]
+    return decision
 
 
 async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
@@ -354,26 +420,33 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
     trip = request.trip
 
     if trip is None:
-        decision = await decide(request.message, request.history)
+        decision: Optional[ChatDecision] = None
+
+        # 助手这次要说的话是**边生成边流出去的** —— 每个 message 事件是一段增量,
+        # 前端负责追加。虽然流式不好再"撤回",但用户能看到字在往外冒,
+        # 而不是盯着空气泡等十几秒。
+        async for item in decide_streaming(request.message, request.history):
+            if "delta" in item:
+                yield {"type": "message", "text": item["delta"]}
+            else:
+                decision = item["decision"]
+
+        if decision is None:  # 防御:decide_streaming 一定会给一条 decision
+            decision = _fallback_decision()
+            yield {"type": "message", "text": decision.reply}
 
         if decision.intent != "plan":
-            if decision.reply:
-                yield {"type": "message", "text": decision.reply}
             yield {"type": "done"}
             return
 
         trip = build_trip_request(decision)
         if trip is None:
-            # 模型判定"可以规划"但槽位拼不出来,说明还差东西。
-            # 这时候**不能**把它的 reply 也发出去 —— 那句多半是
-            # "好的,我这就开始",紧接着又追问,用户会觉得系统在自说自话。
+            # 模型判定"可以规划"但槽位拼不出来。这时候那句话**已经流出去了**
+            # (多半是"好的,我这就开始"),所以只能顺着往下补一句,把话收回圆。
             missing = "、".join(x for x in (decision.missing or []) if x) or "出发日期"
-            yield {"type": "message", "text": f"还差一点信息才能开始规划:{missing}。"}
+            yield {"type": "message", "text": f"\n\n不过还差一点信息:{missing}。告诉我我就开始。"}
             yield {"type": "done"}
             return
-
-        if decision.reply:
-            yield {"type": "message", "text": decision.reply}
 
     # ---- 到这里就复用现有流水线:检索(确定性)+ 规划(唯一那次模型调用) ----
     planner = get_trip_planner_agent()

@@ -16,6 +16,7 @@ from typing import Any, Dict, List
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessageChunk
 
 from app.api.main import app
 from app.models.schemas import ChatMessage, ChatRequest, TripPlan, TripRequest
@@ -207,17 +208,126 @@ class TestDecideFallback:
         """实测撞过 GraphRecursionError:结构化输出失败时模型会一直重发同样参数。
         这种情况下不该把错误抛给用户,而应该退化成一次追问。"""
 
-        class _BoomAgent:
-            async def ainvoke(self, payload, config=None):
+        class _BoomModel:
+            async def astream(self, payload):
                 raise RuntimeError("Recursion limit of 12 reached")
+                yield  # 保持异步生成器
 
-        monkeypatch.setattr(chat_service, "_get_router_agent", lambda: _BoomAgent())
+        monkeypatch.setattr(chat_service, "_get_router_model", lambda: _BoomModel())
 
         decision = asyncio.run(chat_service.decide("给我推荐几个景点", []))
 
         assert decision.intent == "clarify"
         assert decision.reply  # 给用户一句能看懂的话
         assert decision.missing
+
+    def test_fallback_reply_is_also_streamed_out(self, monkeypatch):
+        """退化时也要把兜底话术流出去,否则用户只看到半句话就没了下文。"""
+
+        class _BoomModel:
+            async def astream(self, payload):
+                raise RuntimeError("boom")
+                yield
+
+        monkeypatch.setattr(chat_service, "_get_router_model", lambda: _BoomModel())
+
+        async def run():
+            return [item async for item in chat_service.decide_streaming("???", [])]
+
+        items = asyncio.run(run())
+        deltas = "".join(item.get("delta", "") for item in items)
+        final = items[-1]["decision"]
+        assert deltas == final.reply
+        assert deltas  # 有话说
+
+
+# ---------- 流式回话 ----------
+
+
+def _tool_model(raw_json: str, piece: int = 8):
+    """模拟模型按块吐出工具参数(就是结构化输出的 JSON)。"""
+
+    class _Model:
+        async def astream(self, payload):
+            for index in range(0, len(raw_json), piece):
+                yield AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {"name": "ChatDecision", "args": raw_json[index : index + piece], "index": 0}
+                    ],
+                )
+
+    return _Model()
+
+
+def _stream(model) -> list:
+    async def run():
+        return [item async for item in chat_service.decide_streaming("你好", [], model=model)]
+
+    return asyncio.run(run())
+
+
+class TestStreamingReply:
+    def test_reply_is_streamed_in_pieces(self):
+        raw = (
+            '{"intent": "chat", "reply": "你好！我是智能旅行规划助手，想好去哪里玩了吗？",'
+            ' "missing": []}'
+        )
+        items = _stream(_tool_model(raw))
+
+        deltas = [item["delta"] for item in items if "delta" in item]
+        assert len(deltas) > 3  # 确实是分块吐出来的,不是一次性
+        assert "".join(deltas) == "你好！我是智能旅行规划助手，想好去哪里玩了吗？"
+        assert items[-1]["decision"].intent == "chat"
+        assert items[-1]["streamed"] == "".join(deltas)
+
+    def test_reply_escapes_are_decoded(self):
+        raw = '{"intent": "chat", "reply": "他说\\"故宫\\"不错\\n要不要安排?", "missing": []}'
+        items = _stream(_tool_model(raw))
+
+        text = "".join(item.get("delta", "") for item in items)
+        assert text == '他说"故宫"不错\n要不要安排?'
+
+    def test_extract_reply_handles_truncated_json(self):
+        """参数还没吐完时也要能读出当前值(含半个转义序列的情况)。"""
+        assert chat_service.extract_reply('{"intent": "chat", "reply": "你') == "你"
+        assert chat_service.extract_reply('{"reply": "他说\\') == "他说"
+        # 还没轮到 reply 字段
+        assert chat_service.extract_reply('{"intent": "pl') == ""
+
+    def test_decision_is_still_parsed_from_full_args(self):
+        raw = (
+            '{"intent": "plan", "reply": "好的，北京 3 天", "city": "北京",'
+            ' "travel_days": "三天", "missing": []}'
+        )
+        items = _stream(_tool_model(raw))
+
+        decision = items[-1]["decision"]
+        assert decision.intent == "plan"
+        assert decision.city == "北京"
+        assert decision.travel_days == 3  # 容错校验照旧生效
+
+    def test_run_chat_emits_deltas_that_concatenate(self, monkeypatch):
+        """run_chat 里出现多条 message 事件,拼起来正好是那句话。"""
+
+        class _Model:
+            async def astream(self, payload):
+                for piece in ('{"intent": "chat", "reply": "你好', '，我是助手", "missing": []}'):
+                    yield AIMessageChunk(
+                        content="",
+                        tool_call_chunks=[{"name": "ChatDecision", "args": piece, "index": 0}],
+                    )
+
+        monkeypatch.setattr(chat_service, "_get_router_model", lambda: _Model())
+
+        async def run():
+            return [event async for event in chat_service.run_chat(ChatRequest(message="你好"))]
+
+        events = asyncio.run(run())
+        messages = [event["text"] for event in events if event["type"] == "message"]
+        assert len(messages) >= 2
+        assert "".join(messages) == "你好，我是助手"
+        assert events[-1]["type"] == "done"
 
 
 class TestFormatContext:
@@ -280,10 +390,13 @@ def _planning_events() -> List[Dict[str, Any]]:
 
 def _collect(request: ChatRequest, monkeypatch, decision=None, planner_events=None):
     if decision is not None:
-        async def _fake_decide(message, history, **kwargs):
-            return decision
+        async def _fake_decide_streaming(message, history, **kwargs):
+            reply = decision.reply or ""
+            if reply:
+                yield {"delta": reply}
+            yield {"decision": decision, "streamed": reply}
 
-        monkeypatch.setattr(chat_service, "decide", _fake_decide)
+        monkeypatch.setattr(chat_service, "decide_streaming", _fake_decide_streaming)
     monkeypatch.setattr(
         chat_service,
         "get_trip_planner_agent",
@@ -341,15 +454,20 @@ class TestRunChat:
         assert [event["type"] for event in events] == ["message", "done"]
 
     def test_plan_intent_with_missing_slots_falls_back_to_asking(self, monkeypatch):
-        """模型说能规划,但槽位拼不出来时必须追问,而不是硬跑。"""
+        """模型说能规划,但槽位拼不出来时必须追问,而不是硬跑。
+
+        注意:回话是**流式**出去的,那句"好的,我这就开始"在判断之前就已经到用户
+        眼前了,撤不回来 —— 所以这里是**补一句**把话收回圆,而不是不发。
+        """
         events = _collect(
             ChatRequest(message="北京三天"),
             monkeypatch,
             decision=_decision(travel_days=3, missing=["出发日期"]),
         )
 
-        assert [event["type"] for event in events] == ["message", "done"]
-        assert "出发日期" in events[0]["text"]
+        assert [event["type"] for event in events] == ["message", "message", "done"]
+        said = "".join(event["text"] for event in events if event["type"] == "message")
+        assert "出发日期" in said
 
     def test_structured_passthrough_skips_intent_recognition(self, monkeypatch):
         """表单页直传 trip 时,一次额外的模型调用都不该花。"""

@@ -170,8 +170,10 @@ const send = async () => {
       { message: text, history: historyBefore },
       {
         onMessage: (chunk) => {
+          // message 事件是**逐字流出来的增量**(后端边生成边推),
+          // 所以这里是追加,不能拼换行 —— 否则每个字之间都会断行。
           const msg = messages.value[botIndex]
-          msg.text = msg.text ? `${msg.text}\n${chunk}` : chunk
+          msg.text = (msg.text ?? '') + chunk
           scrollToBottom()
         },
         onProgress: (event) => {
