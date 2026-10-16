@@ -333,6 +333,33 @@ class TestStreamingReply:
         # 还没轮到 reply 字段
         assert chat_service.extract_reply('{"intent": "pl') == ""
 
+    def test_double_escaped_newlines_are_normalized(self):
+        """实测:模型有时把换行写成双重转义,解出来是字面的 ``\\n``。
+        三次请求里出现过一次,用户看到的就是一段里夹着反斜杠 n。"""
+        raw = '{"intent": "chat", "reply": "看这几个：\\\\n- 苏州·拙政园\\\\n- 丽江·束河"}'
+        items = _stream(_tool_model(raw))
+
+        text = "".join(item.get("delta", "") for item in items)
+        assert text == "看这几个：\n- 苏州·拙政园\n- 丽江·束河"
+        assert "\\n" not in text
+        # 流出去的和最终解析出来的必须一致(否则前端会显示半截)
+        assert items[-1]["streamed"] == text
+
+    def test_stream_is_not_cut_off_by_a_dangling_backslash(self):
+        """回归:一次真实请求里,回复被截成"…推荐："后面跟一个孤零零的反斜杠。
+
+        原因是双重转义在流式解析中会短暂解出一个悬空的反斜杠,先被发了出去;
+        等真正的换行到达,文本不再以它为前缀,前缀校验就把后面全挡住了。
+        现在:尾部可能的半个转义序列先扣住不发,最后按公共前缀补齐。
+        """
+        # 逐字符喂,模拟最坏的分块情况(正好切在反斜杠之后)
+        raw = '{"intent": "chat", "reply": "推荐：\\\\n- 苏州"}'
+        items = _stream(_tool_model(raw, piece=1))
+
+        text = "".join(item.get("delta", "") for item in items)
+        assert text == "推荐：\n- 苏州"
+        assert not text.endswith("\\")
+
     def test_decision_is_still_parsed_from_full_args(self):
         raw = (
             '{"intent": "plan", "reply": "好的，北京 3 天", "city": "北京",'

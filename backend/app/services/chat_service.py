@@ -282,6 +282,19 @@ def extract_reply(raw_args: str) -> str:
     return _decode_partial_string(match.group(1)) if match else ""
 
 
+def _normalize_escapes(text: str) -> str:
+    """把**字面量的** ``\\n`` / ``\\t`` 还原成真正的换行和制表符。
+
+    实测踩过:模型有时会把换行写成"双重转义"(JSON 里是 ``\\\\n``),
+    解出来就是两个字符 ``\\`` + ``n``,用户看到的是字面的 ``\\n``。
+    三次请求里出现了一次 —— 旅行对话里没人会真的想显示一个反斜杠加 n,
+    所以这里直接还原。
+    """
+    if "\\n" not in text and "\\t" not in text:
+        return text
+    return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+
+
 _FALLBACK_REPLY = (
     "抱歉,我刚才没太理解。你可以直接告诉我:想去哪个城市、大概什么时候出发、玩几天,"
     "比如「北京玩三天,下周末出发」。"
@@ -411,10 +424,15 @@ async def decide_streaming(
                 if not fragment:
                     continue
                 raw_args += fragment
-                current = extract_reply(raw_args)
-                if len(current) > len(streamed):
-                    yield {"delta": current[len(streamed) :]}
-                    streamed = current
+                current = _normalize_escapes(extract_reply(raw_args))
+                # 末尾若是反斜杠,它可能只是**半个转义序列**(比如刚要吐 \n 里的那个 \),
+                # 先扣住不发 —— 否则等真正的换行到达时,文本就不再以它为前缀,
+                # 前缀校验会把后面所有内容挡住,用户看到的是半句话。
+                # (实测踩过:回复被截成"…推荐："后面跟一个孤零零的反斜杠。)
+                safe = current[:-1] if current.endswith("\\") else current
+                if safe.startswith(streamed) and len(safe) > len(streamed):
+                    yield {"delta": safe[len(streamed) :]}
+                    streamed = safe
     except Exception as exc:  # noqa: BLE001
         print(f"⚠️  意图识别流式中断({type(exc).__name__}: {exc})")
 
@@ -429,12 +447,21 @@ async def decide_streaming(
         decision = _fallback_decision()
 
     # 把"最终决定要说的"和"已经流出去的"对齐:少了的补上,不看半句、也不重复。
-    reply = decision.reply or ""
-    if len(reply) > len(streamed):
-        yield {"delta": reply[len(streamed) :]}
-        streamed = reply
-    elif len(reply) < len(streamed):
-        print(f"⚠️  流出去的内容比最终 reply 长({len(streamed)} > {len(reply)}),以最终为准")
+    reply = _normalize_escapes(decision.reply or "")
+    common = 0
+    for said, want in zip(streamed, reply):
+        if said != want:
+            break
+        common += 1
+
+    if common < len(streamed):
+        # 已经发出去的内容撤不回来。与其让用户看半句话,不如把剩下的续上 ——
+        # 顶多中间一两个字对不齐,但整句是完整的。
+        print(
+            f"⚠️  流出去的内容与最终 reply 有 {len(streamed) - common} 字对不上,已按公共前缀续上"
+        )
+    if common < len(reply):
+        yield {"delta": reply[common:]}
 
     yield {"decision": decision, "streamed": reply}
 
