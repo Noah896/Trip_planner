@@ -122,12 +122,26 @@ const applyProgress = (index: number, event: TripProgressEvent) => {
   // 否则改的是原始对象,Vue 不会重新渲染。
   const msg = messages.value[index]
   if (!msg.progress) msg.progress = []
+
   const row = msg.progress.find((item) => item.label === event.label)
   if (row) {
     row.status = event.status
     row.elapsed = event.elapsed
+    return
+  }
+
+  // 三路检索是并行的,事件到达顺序不固定;按固定顺序插进去,
+  // 免得清单每次刷新都换位置。
+  const row2 = { label: event.label, status: event.status, elapsed: event.elapsed }
+  const rank = (label: string) => {
+    const i = STAGE_LABELS.indexOf(label)
+    return i === -1 ? STAGE_LABELS.length : i
+  }
+  const at = msg.progress.findIndex((item) => rank(item.label) > rank(row2.label))
+  if (at === -1) {
+    msg.progress.push(row2)
   } else {
-    msg.progress.push({ label: event.label, status: event.status, elapsed: event.elapsed })
+    msg.progress.splice(at, 0, row2)
   }
 }
 
@@ -142,12 +156,11 @@ const send = async () => {
   const historyBefore = history.value.slice()
   history.value.push({ role: 'user', content: text })
 
-  const botIndex =
-    messages.value.push({
-      role: 'assistant',
-      text: '',
-      progress: STAGE_LABELS.map((label) => ({ label, status: 'pending' as StageStatus }))
-    }) - 1
+  // 注意:这里**不能**预先把四个阶段摆成"等待中"。
+  // 因为这一轮未必会规划 —— 用户说一句"你好",后端只回一句话、不会发任何进度事件,
+  // 那几行就会永远停在 ⚪,看起来像"它要去生成计划然后卡死了"(踩过这个 bug)。
+  // 现在改成:有进度事件才建清单。
+  const botIndex = messages.value.push({ role: 'assistant', text: '' }) - 1
 
   sending.value = true
   scrollToBottom()

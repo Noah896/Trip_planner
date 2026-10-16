@@ -469,6 +469,18 @@ class MultiAgentTripPlanner:
         started = time.monotonic()
         graph = await self._ensure_graph()
 
+        # 三路检索是并行的:一开始就把它们标成"进行中"。
+        # 否则前端要等第一个节点跑完(实测 7~38 秒)才收到第一条进度事件,
+        # 中间那段什么都看不见 —— 而"看得见在动"正是这条流式链路的意义。
+        for node in RETRIEVAL_NODES:
+            yield {
+                "type": "progress",
+                "stage": node,
+                "label": NODE_LABELS[node],
+                "status": "running",
+                "elapsed": round(time.monotonic() - started, 1),
+            }
+
         pending = set(RETRIEVAL_NODES)
         final_state: Dict[str, Any] = {}
         failure = ""

@@ -132,20 +132,30 @@ class TestEventSequence:
         assert events[-1]["data"]["city"] == "北京"
 
         progress = [event for event in events if event["type"] == "progress"]
-        assert [event["label"] for event in progress] == [
-            "景点检索",
-            "天气查询",
-            "酒店检索",
-            "生成行程",  # running:三路检索都回来了
-            "生成行程",  # done
+
+        # 开头先把三路检索标成"进行中"(它们本来就是并行开始的),
+        # 否则前端要等第一个节点跑完才有进度可看。
+        assert [(e["label"], e["status"]) for e in progress[:3]] == [
+            ("景点检索", "running"),
+            ("天气查询", "running"),
+            ("酒店检索", "running"),
         ]
-        assert progress[3]["status"] == "running"
-        assert progress[4]["status"] == "done"
+        # 然后三路逐个 done
+        assert [(e["label"], e["status"]) for e in progress[3:6]] == [
+            ("景点检索", "done"),
+            ("天气查询", "done"),
+            ("酒店检索", "done"),
+        ]
+        # 最后才是"生成行程":先 running 再 done
+        assert [(e["label"], e["status"]) for e in progress[6:]] == [
+            ("生成行程", "running"),
+            ("生成行程", "done"),
+        ]
         # 每一步都带耗时,前端能直接展示
         assert all(isinstance(event["elapsed"], (int, float)) for event in progress)
 
-    def test_running_event_only_after_all_retrievals(self):
-        """三路里还有没回来的,就不要报"开始生成"。"""
+    def test_generate_plan_not_marked_running_before_retrievals_finish(self):
+        """三路里还有没回来的,就不能报"开始生成行程"。"""
         events = _collect(
             _FakeGraph(
                 [
@@ -155,12 +165,14 @@ class TestEventSequence:
             )
         )
 
-        running = [
+        generating = [
             event
             for event in events
-            if event["type"] == "progress" and event["status"] == "running"
+            if event["type"] == "progress"
+            and event["status"] == "running"
+            and event["label"] == "生成行程"
         ]
-        assert running == []
+        assert generating == []
 
     def test_parallel_nodes_in_one_chunk_are_all_reported(self):
         events = _collect(
