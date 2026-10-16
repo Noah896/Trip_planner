@@ -107,6 +107,27 @@ Get-Process -Name python,uvx,uv -ErrorAction SilentlyContinue
 - **`git commit -m` 里不要放英文双引号**:PowerShell 会把参数切开,
   报 `pathspec ... did not match`。用中文引号「」或干脆不用引号。
 
+### 2.5 Qwen3.5 的 thinking:能流式拿到,但 LangChain 会吞掉(实测结论)
+
+> 这一条是**探针结论**,不是功能说明 —— 相关的「深度思考」功能已按用户要求回退
+> (完整实现与验证记录在 tag `backup/with-thinking-2026-10-16`,提交 `adb88f3`)。
+> 之所以把结论留下来:它来之不易,而且**不记下来很容易得出相反的错误结论**。
+
+2026-10-16 用**裸 `openai` SDK**实测(`stream=True` + `extra_body={"enable_thinking": true}`):
+
+- 服务端**确实**按增量返回 `delta.reasoning_content` —— 单次回答拿到
+  **6098 字符推理内容 + 2993 字符正文,共 1534 个 delta**。
+  也就是说"像 DeepSeek 那样把思考过程流式打出来"**技术上可行**。
+- **但走 LangChain 的 `ChatOpenAI` 拿不到**:`additional_kwargs` 是空的、
+  推理增量块为 0。⚠️ 第一次探针就是用 LangChain 跑的,**差点得出"做不到"的错误结论**
+  —— 要用这个能力必须绕开 LangChain 直接调 SDK。
+- **代价**:那次调用跑了约 110 秒(推理还是英文的,而且很长)。
+  真要产品化必须加闸门(回退前那版用的是 **700 字上限 + 30 秒超时,先到先停**),
+  否则为了"看思考"要多等将近两分钟。
+- 另外:开 thinking 时 `tool_choice=required/object` 会被服务端拒绝(400),
+  即 **thinking 与 `response_format` 结构化输出不能共存于同一次调用**
+  (第 4 节第二轮的日志里记过这个坑)。
+
 ---
 
 ## 3. 架构与关键文件
@@ -534,6 +555,17 @@ LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成�
 改动都用 `git diff` 逐行核对过,提交前测试全绿。
 
 > 提示:提交后如果又改了代码,记得在**提交前**回来更新本节,别让这里和仓库状态对不上。
+
+### 回退「深度思考」+ 保留实测结论(2026-10-16)
+
+用户试用后选择回到 `9823a7a`(只撤掉「深度思考」,聊天页保留),已执行
+`git reset --hard 9823a7a`,并留下保险 tag `backup/with-thinking-2026-10-16`(`adb88f3`)。
+撤掉的内容:`app/services/thinking.py`、`tests/test_thinking.py`、`ChatRequest.thinking`、
+`plan_trip_stream` 的 `thinking` 参数、前端开关与思考过程块。测试 131 → **122 全绿**。
+
+**但把探针结论单独留在了第 2.5 节**(纯文档,不含任何功能代码)——
+第一次探针用 LangChain 跑,结论是"零推理块",差点误判成"平台不支持";
+这种坑不写下来下次还会重走一遍。
 
 ### 第六轮(前端聊天页)
 
