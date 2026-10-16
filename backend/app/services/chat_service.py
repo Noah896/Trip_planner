@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 from datetime import date, datetime, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
@@ -146,13 +147,17 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 用户说"随便""都行""你定""推荐一个就行"时,**不要再问同一个问题** ——
 他那句话的意思就是"我不想选"。
 
-这时应该直接给 **2~4 个具体选项**,一行一个,格式 `城市 · 景点 —— 一句话为什么`,
-覆盖不同类型(历史 / 自然 / 美食 / 亲子),让他从里面挑。例如:
+这时应该直接给 **2~4 个具体选项**,**每个占一行、以 `- ` 开头**,
+格式 `城市 · 景点 —— 一句话为什么`,覆盖不同类型(历史 / 自然 / 美食 / 亲子)。
+**不要把它们挤成一整段**,那样很难扫读。
 
-- 北京 · 故宫博物院 —— 想看明清皇宫和中轴线,历史感最强
-- 西安 · 兵马俑 —— 想看震撼的考古现场
-- 成都 · 大熊猫繁育研究基地 —— 带小孩或想轻松一点
-- 杭州 · 西湖 —— 想慢逛、拍照、吃本地菜
+**优先从下面这几条里挑**(它们是本次随机抽的,每次都不一样):
+
+{examples}
+
+如果它们跟用户这次的条件都不搭,可以再补充一个你觉得更合适的。
+但**绝对不要每次都推荐同样的几个地方** —— 实测踩过这个坑:
+格式示例被当成答案照抄,结果不管谁来问,推荐永远是那四个。
 
 给完选项后补一句"想排成完整行程的话,告诉我选哪个、大概什么时候去"即可。
 **在这里重复追问是最糟的回应。**
@@ -187,6 +192,45 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 
 **missing 字段**:intent=clarify 时列出还缺的信息(中文,如 "出发日期"、"行程天数")。
 """
+
+# 随机示例池:每次抽几条塞进提示词当"格式示例"。
+#
+# 为什么需要它:光写"不要照抄示例"是没用的 —— 模型会盯着示例。
+# 让**示例本身每次都变**,照抄也就不会重复了。
+# 全部限定在中国大陆,并且刻意混入一些不那么烂大街的地方,
+# 免得推荐永远绕着"故宫 / 兵马俑 / 西湖"打转。
+RECOMMENDATION_POOL: List[tuple] = [
+    ("北京", "故宫博物院", "想看明清皇宫和中轴线"),
+    ("西安", "秦始皇兵马俑", "想看震撼的考古现场"),
+    ("成都", "大熊猫繁育研究基地", "带小孩,或想轻松一点"),
+    ("杭州", "西湖", "想慢逛、拍照、吃本地菜"),
+    ("泉州", "开元寺", "想看海丝古迹又不想人挤人"),
+    ("大同", "云冈石窟", "想看北魏石窟造像"),
+    ("景德镇", "陶溪川", "想逛陶瓷市集、动手做点东西"),
+    ("洛阳", "龙门石窟", "想看石刻,顺带看牡丹"),
+    ("青岛", "八大关", "想吹海风、看老建筑"),
+    ("重庆", "洪崖洞", "想吃辣、看立体城市"),
+    ("苏州", "拙政园", "想看园林、听评弹"),
+    ("敦煌", "莫高窟", "想看壁画和沙漠"),
+    ("厦门", "鼓浪屿", "想在海边发呆"),
+    ("哈尔滨", "中央大街", "想看冰雪、吃俄式西餐"),
+    ("长沙", "岳麓山", "想吃夜宵顺便爬山"),
+    ("丽江", "束河古镇", "想慢下来住几天"),
+]
+
+# 每次抽几条当示例
+RECOMMENDATION_SAMPLE_SIZE = 3
+
+
+def build_system_prompt() -> str:
+    """渲染系统提示词,并随机换掉里面那几条"格式示例"。
+
+    用 ``replace`` 而不是 ``str.format``:提示词里有反引号、中文括号,
+    以后万一出现 ``{`` / ``}`` 也不会被当成占位符。
+    """
+    sample = random.sample(RECOMMENDATION_POOL, RECOMMENDATION_SAMPLE_SIZE)
+    examples = "\n".join(f"- {city} · {spot} —— {why}" for city, spot, why in sample)
+    return CHAT_SYSTEM_PROMPT.replace("{examples}", examples)
 
 # 意图识别用的模型:直接绑 ChatDecision 这个"工具"。
 #
@@ -353,7 +397,7 @@ async def decide_streaming(
     """
     router = model or _get_router_model()
     payload = [
-        {"role": "system", "content": CHAT_SYSTEM_PROMPT},
+        {"role": "system", "content": build_system_prompt()},
         {"role": "user", "content": _format_context(message, history, today or date.today())},
     ]
 

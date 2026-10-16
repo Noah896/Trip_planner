@@ -132,6 +132,44 @@ class TestMustVisitPrompt:
         assert "不能漏" in prompt
 
 
+class TestRecommendationVariety:
+    """用户报:让助手推荐景点,永远是那几个。
+
+    根因是我们把示例景点**写死在提示词里**了,模型直接把示例当答案照抄。
+    修法:示例改成每次从池子里随机抽,并在提示词里点明"只是格式示例"。
+    """
+
+    def test_prompt_no_longer_hardcodes_the_examples(self):
+        template = chat_service.CHAT_SYSTEM_PROMPT
+        assert "{examples}" in template
+        # 那四条不能再躺在提示词模板里
+        assert "北京 · 故宫博物院 —— 想看明清皇宫和中轴线,历史感最强" not in template
+
+    def test_examples_are_injected_from_the_pool(self):
+        prompt = chat_service.build_system_prompt()
+        assert "{examples}" not in prompt
+        filled = [
+            line
+            for line in prompt.splitlines()
+            if line.startswith("- ") and " · " in line and " —— " in line
+        ]
+        assert len(filled) == chat_service.RECOMMENDATION_SAMPLE_SIZE
+        pool_lines = {
+            f"- {city} · {spot} —— {why}" for city, spot, why in chat_service.RECOMMENDATION_POOL
+        }
+        assert set(filled) <= pool_lines
+
+    def test_examples_change_between_calls(self):
+        """示例每次都变,照抄也就不会重复。"""
+        seen = {chat_service.build_system_prompt() for _ in range(6)}
+        assert len(seen) > 1
+
+    def test_pool_stays_in_china_and_is_varied(self):
+        cities = [city for city, _, _ in chat_service.RECOMMENDATION_POOL]
+        assert len(cities) == len(set(cities))  # 城市不重复
+        assert len(cities) >= 12  # 池子够大,随机才有意义
+
+
 class TestDecisionTolerance:
     def test_preferences_written_as_string(self):
         """模型偶尔把数组写成 "历史文化、美食",不能因此整轮失败。"""
