@@ -169,6 +169,7 @@ async def plan_trip_stream(request: TripRequest) -> StreamingResponse:
                     event["used_memory"] = [
                         item.model_dump(mode="json") for item in used_memory
                     ]
+                    event["used_history"] = None
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:  # noqa: BLE001 - 流已经开始,只能把错误推给前端
             print(f"❌ 流式规划中断: {type(exc).__name__}: {exc}")

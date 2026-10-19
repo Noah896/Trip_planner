@@ -300,6 +300,7 @@ class TestStreamRoute:
         assert payloads[-1]["type"] == "result"
         assert payloads[-1]["data"]["city"] == "北京"
         assert payloads[-1]["used_memory"] == []
+        assert payloads[-1]["used_history"] is None
 
     def test_mid_stream_failure_becomes_an_error_event(self, monkeypatch):
         monkeypatch.setattr(

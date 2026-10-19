@@ -34,6 +34,11 @@
           </div>
 
           <div v-if="msg.plan" class="artifact-box">
+            <MemoryReceipt
+              :used-memory="msg.usedMemory"
+              :used-history="msg.usedHistory"
+              compact
+            />
             <TripPlanView :plan="msg.plan" />
             <div class="artifact-actions">
               <a-button type="primary" size="small" @click="openResult">
@@ -61,10 +66,17 @@
 <script setup lang="ts">
 import { nextTick, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import MemoryReceipt from '@/components/MemoryReceipt.vue'
 import TripPlanView from '@/components/TripPlanView.vue'
 import { chatStream } from '@/services/api'
 import { getMemoryIdentity } from '@/services/session'
-import type { ChatTurn, TripPlan, TripProgressEvent } from '@/types'
+import type {
+  ChatTurn,
+  HistoryUsage,
+  TripPlan,
+  TripProgressEvent,
+  UsedMemoryFact
+} from '@/types'
 
 type StageStatus = 'pending' | 'running' | 'done'
 
@@ -81,6 +93,8 @@ interface ChatBubble {
   plan?: TripPlan | null
   degraded?: boolean
   failed?: boolean
+  usedMemory?: UsedMemoryFact[]
+  usedHistory?: HistoryUsage | null
 }
 
 const router = useRouter()
@@ -104,6 +118,8 @@ const history = ref<ChatTurn[]>([])
 
 const latestPlan = ref<TripPlan | null>(null)
 const latestDegraded = ref(false)
+const latestUsedMemory = ref<UsedMemoryFact[]>([])
+const latestUsedHistory = ref<HistoryUsage | null>(null)
 const hasPlan = ref(false)
 
 const stageIcon = (status: StageStatus): string => {
@@ -191,8 +207,12 @@ const send = async () => {
           const msg = messages.value[botIndex]
           msg.plan = event.data
           msg.degraded = event.degraded
+          msg.usedMemory = event.used_memory ?? []
+          msg.usedHistory = event.used_history ?? null
           latestPlan.value = event.data
           latestDegraded.value = event.degraded
+          latestUsedMemory.value = msg.usedMemory
+          latestUsedHistory.value = msg.usedHistory
           hasPlan.value = true
           scrollToBottom()
         }
@@ -235,6 +255,13 @@ const openResult = () => {
   // 结果页是从 sessionStorage 读的,这里按它的约定塞进去
   sessionStorage.setItem('tripPlan', JSON.stringify(plan))
   sessionStorage.setItem('tripPlanDegraded', latestDegraded.value ? '1' : '0')
+  sessionStorage.setItem(
+    'tripPlanMemoryReceipt',
+    JSON.stringify({
+      used_memory: latestUsedMemory.value,
+      used_history: latestUsedHistory.value
+    })
+  )
   router.push('/result')
 }
 </script>

@@ -377,6 +377,13 @@ const handleSubmit = async () => {
       // 保存到sessionStorage(degraded 单独存一份,结果页要用来显示提示)
       sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
       sessionStorage.setItem('tripPlanDegraded', response.degraded ? '1' : '0')
+      sessionStorage.setItem(
+        'tripPlanMemoryReceipt',
+        JSON.stringify({
+          used_memory: response.used_memory ?? [],
+          used_history: response.used_history ?? null
+        })
+      )
 
       if (response.degraded) {
         message.warning(response.message || 'AI 规划未完成,已返回占位行程,仅供参考')
@@ -783,4 +790,3 @@ const handleSubmit = async () => {
   }
 }
 </style>
-

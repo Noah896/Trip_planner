@@ -143,6 +143,7 @@ export interface TripStreamResult {
   memory_saved?: boolean
   memory_version?: number
   used_memory?: UsedMemoryFact[]
+  used_history?: HistoryUsage | null
 }
 
 /** 流中途出错(此时 HTTP 状态码已经是 200,只能靠事件报错) */

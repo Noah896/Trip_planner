@@ -45,6 +45,13 @@
       />
     </div>
 
+    <div
+      v-if="tripPlan && (usedMemory.length || usedHistory)"
+      class="memory-receipt-wrapper"
+    >
+      <MemoryReceipt :used-memory="usedMemory" :used-history="usedHistory" />
+    </div>
+
     <div v-if="tripPlan" class="content-wrapper">
       <!-- 侧边导航 -->
       <div class="side-nav">
@@ -325,12 +332,15 @@ import { DownOutlined } from '@ant-design/icons-vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
-import type { TripPlan } from '@/types'
+import MemoryReceipt from '@/components/MemoryReceipt.vue'
+import type { HistoryUsage, TripPlan, UsedMemoryFact } from '@/types'
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
 // 后端标记的降级结果(占位行程),用于在页面顶部提示
 const degraded = ref(false)
+const usedMemory = ref<UsedMemoryFact[]>([])
+const usedHistory = ref<HistoryUsage | null>(null)
 const editMode = ref(false)
 const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
@@ -343,6 +353,19 @@ onMounted(async () => {
   if (data) {
     tripPlan.value = JSON.parse(data)
     degraded.value = sessionStorage.getItem('tripPlanDegraded') === '1'
+    const receipt = sessionStorage.getItem('tripPlanMemoryReceipt')
+    if (receipt) {
+      try {
+        const parsed = JSON.parse(receipt)
+        usedMemory.value = Array.isArray(parsed.used_memory)
+          ? parsed.used_memory
+          : []
+        usedHistory.value = parsed.used_history ?? null
+      } catch {
+        usedMemory.value = []
+        usedHistory.value = null
+      }
+    }
     // 加载景点图片
     await loadAttractionPhotos()
     // 等待DOM渲染完成后初始化地图
@@ -959,6 +982,11 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   max-width: 1400px;
   margin: 0 auto 20px;
   animation: fadeInDown 0.6s ease-out;
+}
+
+.memory-receipt-wrapper {
+  max-width: 1400px;
+  margin: 0 auto 16px;
 }
 
 .side-nav {
