@@ -276,6 +276,46 @@ class TripPlanResponse(BaseModel):
     memory_version: Optional[int] = Field(default=None, description="写入后的会话版本")
 
 
+class MemoryFactResponse(BaseModel):
+    """一条长期偏好事实的对外表示。"""
+
+    id: int = Field(..., description="事实 ID")
+    user_id: str = Field(..., description="所属用户 ID")
+    category: str = Field(..., description="偏好分类")
+    key: str = Field(..., description="同一分类下的稳定键")
+    value: Any = Field(..., description="用户明确表达的偏好值")
+    source_text: str = Field(default="", description="原始出处文本")
+    source_session_id: Optional[str] = Field(default=None, description="来源会话 ID")
+    confidence: float = Field(..., ge=0, le=1, description="可信度")
+    status: str = Field(..., description="active / superseded")
+    created_at: str = Field(..., description="创建时间")
+    updated_at: str = Field(..., description="更新时间")
+    superseded_by: Optional[int] = Field(
+        default=None, description="被哪条新事实取代"
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MemoryListResponse(BaseModel):
+    """用户当前生效的长期偏好。"""
+
+    user_id: str = Field(..., description="用户 ID")
+    total: int = Field(..., ge=0, description="返回条数")
+    facts: List[MemoryFactResponse] = Field(default=[], description="偏好事实")
+
+
+class MemoryDeleteResponse(BaseModel):
+    """删除用户全部记忆后的计数。"""
+
+    success: bool = Field(default=True, description="是否完成删除")
+    user_id: str = Field(..., description="用户 ID")
+    deleted_total: int = Field(..., ge=0, description="删除记录总数")
+    deleted_facts: int = Field(..., ge=0, description="删除的偏好事实数")
+    deleted_history: int = Field(..., ge=0, description="删除的历史行程数")
+    deleted_sessions: int = Field(..., ge=0, description="删除的会话数")
+
+
 class POIInfo(BaseModel):
     """POI信息"""
     id: str = Field(..., description="POI ID")

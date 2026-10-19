@@ -172,6 +172,33 @@ POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同�
 
 ## 4. 进度日志
 
+### 2026-10-19(长期偏好基础:事实生命周期 + 隐私管理接口)
+
+按记忆主线完成了 `memory_facts` 的存储基础,本轮**没有新增模型调用**,也没有开始
+偏好抽取或注入。
+
+**本轮完成:**
+
+1. `MemoryStore` 新增 `MemoryFact` / `MemoryDeletion` 数据结构和三个方法:
+   - `get_facts()`:按用户读取,支持 category / key / status 过滤;
+   - `upsert_fact()`:同值刷新出处,值变化时把旧记录标记为 `superseded`,
+     新记录成为唯一 active,并用 `superseded_by` 保留演进关系;
+   - `delete_user_memory()`:物理删除用户的偏好事实、历史行程和服务端会话。
+2. SQLite 增加 active 唯一索引,保证
+   `(user_id, category, memory_key)` 同时只有一条生效事实。
+3. 新增 `GET /api/memory/{user_id}`:
+   默认返回 active 偏好,`status=all` 可查看已被取代的历史事实。
+4. 新增 `DELETE /api/memory/{user_id}`:
+   返回偏好 / 历史行程 / 会话三类删除计数;会明确清空该用户全部服务端记忆。
+5. 新增 `tests/test_memory_facts.py`,覆盖同值去重、值变更留痕、过滤、
+   跨用户隔离、全量删除和 HTTP 契约。
+
+**验证:** `pytest` 169 → **175 全绿**;没有调用模型,没有新增依赖。
+
+**仍未完成(下一步):** 从用户明确表达中抽取偏好并调用 `upsert_fact()`;
+规划前全量读取并注入 active 偏好;响应返回 `used_memory`。
+`trip_history` 的情景记忆召回仍排在偏好闭环之后。
+
 ### 2026-10-19(RAG 方案已保存,暂不实施)
 
 用户要求为系统增加 RAG 能力,但明确“先保存方案,晚点再做”。本轮只做设计归档,
@@ -806,11 +833,11 @@ LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成�
 
 ### P0 · 记忆系统(当前主线)
 
-> **2026-10-18 进度**:第 1 步“服务端会话 + refine”已完成并提交前验证:
-> SQLite `session_state` / `trip_history` / `memory_facts` 表已建立,
-> 正常行程可保存,`intent=refine` 可基于上一版修改;前端已发送稳定
-> `session_id`。当前下一小步是 `memory_facts` 的显式偏好抽取、注入、
-> 查询与删除接口;**仍然不做向量库**。
+> **2026-10-19 进度**:第 1 步“服务端会话 + refine”已完成并提交
+> (`71a0bc1`);`memory_facts` 的事实生命周期与
+> `GET/DELETE /api/memory/{user_id}` 已完成。当前下一小步是把用户**显式表达**
+> 的偏好写入事实表,并在下一次规划前全量注入 active 偏好,响应返回
+> `used_memory`;**仍然不做向量库**。
 
 > **2026-10-16 追加**:用户要求增加**聊天式入口**(与表单入口**并重**,不是替换),
 > 并且聊天里要把 LLM 返回的行程数据(天气 / 景点 / 酒店 / 预算)渲染成卡片,

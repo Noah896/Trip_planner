@@ -9,7 +9,7 @@ from ..config import get_settings, print_config, validate_config
 from ..services.amap_mcp import shutdown_amap_server
 from .routes import chat
 from .routes import map as map_routes
-from .routes import poi, trip
+from .routes import memory, poi, trip
 
 # 获取配置
 settings = get_settings()
@@ -70,6 +70,7 @@ app.add_middleware(
 # 注册路由
 app.include_router(trip.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+app.include_router(memory.router, prefix="/api")
 app.include_router(poi.router, prefix="/api")
 app.include_router(map_routes.router, prefix="/api")
 

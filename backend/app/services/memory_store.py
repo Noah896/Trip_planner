@@ -15,7 +15,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ..config import get_settings
 from ..models.schemas import TripPlan, TripRequest
@@ -36,6 +36,43 @@ class SessionMemory:
     plan: Dict[str, Any]
     version: int
     updated_at: str
+
+
+@dataclass(frozen=True)
+class MemoryFact:
+    """一条长期偏好事实。
+
+    同一个 ``(user_id, category, key)`` 只保留一条 active 记录。值发生变化时,
+    旧记录会标记为 ``superseded``,并通过 ``superseded_by`` 指向新记录,从而保留
+    用户偏好变化的出处,而不是静默覆盖。
+    """
+
+    id: int
+    user_id: str
+    category: str
+    key: str
+    value: Any
+    source_text: str
+    source_session_id: Optional[str]
+    confidence: float
+    status: str
+    created_at: str
+    updated_at: str
+    superseded_by: Optional[int]
+
+
+@dataclass(frozen=True)
+class MemoryDeletion:
+    """删除一个用户全部记忆后的计数。"""
+
+    user_id: str
+    facts: int
+    history: int
+    sessions: int
+
+    @property
+    def total(self) -> int:
+        return self.facts + self.history + self.sessions
 
 
 class MemoryStore:
@@ -99,6 +136,10 @@ class MemoryStore:
 
                     CREATE INDEX IF NOT EXISTS idx_memory_facts_user
                     ON memory_facts(user_id, status);
+
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_facts_active_key
+                    ON memory_facts(user_id, category, memory_key)
+                    WHERE status = 'active';
 
                     CREATE TABLE IF NOT EXISTS trip_history (
                         id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -267,6 +308,210 @@ class MemoryStore:
         if saved is None:  # pragma: no cover - 写入后立刻读取,理论上不可能
             raise RuntimeError("会话保存后无法读取")
         return saved
+
+    @staticmethod
+    def _row_to_fact(row: sqlite3.Row) -> MemoryFact:
+        return MemoryFact(
+            id=int(row["id"]),
+            user_id=row["user_id"],
+            category=row["category"],
+            key=row["memory_key"],
+            value=json.loads(row["value_json"]),
+            source_text=row["source_text"],
+            source_session_id=row["source_session_id"],
+            confidence=float(row["confidence"]),
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            superseded_by=(
+                int(row["superseded_by"]) if row["superseded_by"] is not None else None
+            ),
+        )
+
+    def get_facts(
+        self,
+        user_id: str,
+        *,
+        status: Optional[str] = "active",
+        category: Optional[str] = None,
+        key: Optional[str] = None,
+    ) -> List[MemoryFact]:
+        """按用户读取偏好事实,默认只返回当前生效的记录。"""
+        user_id = (user_id or "").strip()
+        if not user_id:
+            return []
+
+        clauses = ["user_id = ?"]
+        params: List[Any] = [user_id]
+        if status:
+            clauses.append("status = ?")
+            params.append(status.strip())
+        if category and category.strip():
+            clauses.append("category = ?")
+            params.append(category.strip())
+        if key and key.strip():
+            clauses.append("memory_key = ?")
+            params.append(key.strip())
+
+        self._ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, user_id, category, memory_key, value_json, source_text,
+                       source_session_id, confidence, status, created_at, updated_at,
+                       superseded_by
+                FROM memory_facts
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, id DESC
+                """,
+                params,
+            ).fetchall()
+        return [self._row_to_fact(row) for row in rows]
+
+    def upsert_fact(
+        self,
+        *,
+        user_id: str,
+        category: str,
+        key: str,
+        value: Any,
+        source_text: str = "",
+        source_session_id: Optional[str] = None,
+        confidence: float = 1.0,
+    ) -> MemoryFact:
+        """写入一条显式偏好事实。
+
+        同值写入只刷新出处和时间;值变化时先把旧记录标记为 superseded,再插入
+        active 新记录。调用方负责保证 ``value`` 是用户明确表达的信息。
+        """
+        user_id = (user_id or "").strip()
+        category = (category or "").strip()
+        key = (key or "").strip()
+        if not user_id:
+            raise ValueError("user_id 不能为空")
+        if not category:
+            raise ValueError("category 不能为空")
+        if not key:
+            raise ValueError("key 不能为空")
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("confidence 必须在 0 到 1 之间")
+
+        self._ensure_schema()
+        now = self._now().isoformat()
+        value_json = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                """
+                SELECT id, value_json
+                FROM memory_facts
+                WHERE user_id = ? AND category = ? AND memory_key = ?
+                  AND status = 'active'
+                """,
+                (user_id, category, key),
+            ).fetchone()
+
+            if current is not None and json.loads(current["value_json"]) == value:
+                connection.execute(
+                    """
+                    UPDATE memory_facts
+                    SET source_text = ?, source_session_id = ?, confidence = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        source_text,
+                        (source_session_id or "").strip() or None,
+                        confidence,
+                        now,
+                        current["id"],
+                    ),
+                )
+                fact_id = int(current["id"])
+            else:
+                if current is not None:
+                    connection.execute(
+                        """
+                        UPDATE memory_facts
+                        SET status = 'superseded', updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now, current["id"]),
+                    )
+
+                cursor = connection.execute(
+                    """
+                    INSERT INTO memory_facts (
+                        user_id, category, memory_key, value_json, source_text,
+                        source_session_id, confidence, status, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                    """,
+                    (
+                        user_id,
+                        category,
+                        key,
+                        value_json,
+                        source_text,
+                        (source_session_id or "").strip() or None,
+                        confidence,
+                        now,
+                        now,
+                    ),
+                )
+                fact_id = int(cursor.lastrowid)
+
+                if current is not None:
+                    connection.execute(
+                        """
+                        UPDATE memory_facts
+                        SET superseded_by = ?
+                        WHERE id = ?
+                        """,
+                        (fact_id, current["id"]),
+                    )
+
+            row = connection.execute(
+                """
+                SELECT id, user_id, category, memory_key, value_json, source_text,
+                       source_session_id, confidence, status, created_at, updated_at,
+                       superseded_by
+                FROM memory_facts
+                WHERE id = ?
+                """,
+                (fact_id,),
+            ).fetchone()
+
+        if row is None:  # pragma: no cover - 写入后立刻读取,理论上不可能
+            raise RuntimeError("偏好事实保存后无法读取")
+        return self._row_to_fact(row)
+
+    def delete_user_memory(self, user_id: str) -> MemoryDeletion:
+        """物理删除一个用户的偏好、历史行程和服务端会话。"""
+        user_id = (user_id or "").strip()
+        if not user_id:
+            raise ValueError("user_id 不能为空")
+
+        self._ensure_schema()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            facts = connection.execute(
+                "DELETE FROM memory_facts WHERE user_id = ?", (user_id,)
+            ).rowcount
+            history = connection.execute(
+                "DELETE FROM trip_history WHERE user_id = ?", (user_id,)
+            ).rowcount
+            sessions = connection.execute(
+                "DELETE FROM session_state WHERE user_id = ?", (user_id,)
+            ).rowcount
+
+        return MemoryDeletion(
+            user_id=user_id,
+            facts=int(facts or 0),
+            history=int(history or 0),
+            sessions=int(sessions or 0),
+        )
 
     def purge_expired(self) -> int:
         """删除超过 TTL 的会话,返回删除条数。"""
