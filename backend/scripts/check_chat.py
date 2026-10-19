@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from auth_client import get_auth_headers
+
 BACKEND_URL = os.getenv("TRIP_BACKEND_URL", "http://127.0.0.1:8000")
 CHAT_PATH = "/api/chat/stream"
 
@@ -92,6 +94,12 @@ async def main() -> int:
     artifacts = 0
 
     async with httpx.AsyncClient(timeout=300.0) as client:
+        try:
+            client.headers.update(await get_auth_headers(client, BACKEND_URL))
+        except RuntimeError as exc:
+            print(f"❌ {exc}")
+            return 1
+
         # ---- 第 1 轮:只给城市和天数,期望被追问 ----
         first = await send(client, FIRST_MESSAGE, history)
         if first is not None:

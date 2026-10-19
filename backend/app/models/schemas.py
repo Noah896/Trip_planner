@@ -71,7 +71,10 @@ class TripRequest(BaseModel):
     )
     user_id: Optional[str] = Field(
         default=None,
-        description="稳定用户 ID。多用户部署时应由鉴权层写入,不能直接信任客户端",
+        description=(
+            "兼容字段。开启账号鉴权时会以 Bearer token 对应的 user_id 为准,"
+            "客户端传值会被覆盖"
+        ),
         max_length=128,
     )
 
@@ -395,6 +398,49 @@ class ErrorResponse(BaseModel):
     error_code: Optional[str] = Field(default=None, description="错误代码")
 
 
+# ============ 账号鉴权 ============
+
+
+class AuthRegisterRequest(BaseModel):
+    """注册请求。"""
+
+    username: str = Field(..., min_length=3, max_length=32)
+    password: str = Field(..., min_length=8, max_length=128)
+    registration_key: Optional[str] = Field(default=None, max_length=256)
+
+
+class AuthLoginRequest(BaseModel):
+    """登录请求。"""
+
+    username: str = Field(..., min_length=3, max_length=32)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class AuthUserResponse(BaseModel):
+    """当前登录用户。"""
+
+    user_id: str
+    username: str
+    created_at: str
+
+
+class AuthTokenResponse(BaseModel):
+    """登录成功后返回的 Bearer token。"""
+
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_at: str
+    user: AuthUserResponse
+
+
+class AuthStatusResponse(BaseModel):
+    """前端用于判断登录能力和注册能力的公开状态。"""
+
+    enabled: bool
+    registration_enabled: bool
+    registration_requires_key: bool
+
+
 # ============ 聊天式入口 ============
 
 
@@ -431,7 +477,10 @@ class ChatRequest(BaseModel):
     )
     user_id: Optional[str] = Field(
         default=None,
-        description="稳定用户 ID。多用户部署时应来自鉴权层",
+        description=(
+            "兼容字段。开启账号鉴权时会以 Bearer token 对应的 user_id 为准,"
+            "客户端传值会被覆盖"
+        ),
         max_length=128,
     )
 

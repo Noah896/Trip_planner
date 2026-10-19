@@ -1,7 +1,8 @@
-/** 浏览器本地记忆身份。登录接入后,user_id 应改为由鉴权层提供。 */
+/** 浏览器本地会话 ID;用户身份统一来自服务端签发的登录令牌。 */
 
-const SESSION_KEY = 'tripPlannerSessionId'
-const USER_KEY = 'tripPlannerUserId'
+import { getStoredAuthUser } from '@/services/auth'
+
+const SESSION_KEY_PREFIX = 'tripPlannerSessionId'
 
 function randomId(prefix: string): string {
   const uuid = globalThis.crypto?.randomUUID?.()
@@ -19,18 +20,24 @@ function getOrCreate(key: string, prefix: string): string {
 
 export interface MemoryIdentity {
   session_id: string
-  user_id: string
+  user_id?: string
+}
+
+function currentSessionKey(): string {
+  const user = getStoredAuthUser()
+  return `${SESSION_KEY_PREFIX}:${user?.user_id ?? 'anonymous'}`
 }
 
 export function getMemoryIdentity(): MemoryIdentity {
+  const user = getStoredAuthUser()
   return {
-    session_id: getOrCreate(SESSION_KEY, 'session'),
-    user_id: getOrCreate(USER_KEY, 'local')
+    session_id: getOrCreate(currentSessionKey(), 'session'),
+    user_id: user?.user_id
   }
 }
 
 export function resetMemorySession(): string {
   const sessionId = randomId('session')
-  localStorage.setItem(SESSION_KEY, sessionId)
+  localStorage.setItem(currentSessionKey(), sessionId)
   return sessionId
 }

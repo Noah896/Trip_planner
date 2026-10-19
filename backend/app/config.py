@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     # 会话记忆保留天数;过期记录会在读写时顺带清理。
     memory_session_ttl_days: int = 30
 
+    # 账号鉴权。开启后,行程、聊天和记忆接口都必须携带 Bearer token。
+    auth_enabled: bool = True
+    auth_db_path: str = "data/trip_auth.sqlite3"
+    auth_session_ttl_days: int = 30
+    auth_allow_registration: bool = True
+    # 非空时,注册必须提供相同邀请码。生产环境应设置该值或关闭公开注册。
+    auth_registration_key: str = ""
+
     # 兼容旧字段(保留以免破坏其他引用)
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
@@ -142,6 +150,17 @@ def validate_config():
     if not settings.amap_api_key:
         errors.append("AMAP_API_KEY未配置")
 
+    if (
+        settings.auth_enabled
+        and settings.auth_allow_registration
+        and not (settings.auth_registration_key or "").strip()
+        and not settings.is_development
+    ):
+        errors.append(
+            "生产环境开启账号注册时必须配置 AUTH_REGISTRATION_KEY,"
+            "或设置 AUTH_ALLOW_REGISTRATION=false"
+        )
+
     # LLM 凭据按优先级解析,缺失时只告警不阻断启动
     _, llm_api_key, _ = settings.resolve_llm_credentials()
     if not llm_api_key:
@@ -168,6 +187,10 @@ def print_config():
     print(f"版本: {settings.app_version}")
     print(f"服务器: {settings.host}:{settings.port}")
     print(f"高德地图API Key: {'已配置' if settings.amap_api_key else '未配置'}")
+    print(
+        f"账号鉴权: {'已启用' if settings.auth_enabled else '已关闭'};"
+        f" 注册: {'开放' if settings.auth_allow_registration else '关闭'}"
+    )
 
     # 检查LLM配置
     llm_model, llm_api_key, llm_base_url = settings.resolve_llm_credentials()

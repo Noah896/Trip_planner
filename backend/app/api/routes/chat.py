@@ -8,13 +8,14 @@
 """
 
 import json
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from ...models.schemas import ChatRequest
 from ...services import chat_service
+from ..auth_dependencies import AuthContext, get_auth_context
 
 router = APIRouter(prefix="/chat", tags=["对话式规划"])
 
@@ -33,12 +34,24 @@ router = APIRouter(prefix="/chat", tags=["对话式规划"])
         '- `{"type":"done","request":{...},"session_id":...,"memory_saved":...}` —— 本轮结束\n'
         '- `{"type":"error","message":"..."}` —— 出错(流已开始,只能推事件)\n\n'
         "若客户端已经填好表单,可直接传 `trip` 字段 —— 此时跳过意图识别,"
-        "不额外消耗模型调用。传稳定的 `session_id` / `user_id` 后,"
-        "成功行程会写入 SQLite,下一轮可以只说「把第二天换成博物馆」。"
+        "不额外消耗模型调用。开启账号鉴权后,用户身份来自 Bearer token;"
+        "配合稳定的 `session_id`,成功行程会写入 SQLite,"
+        "下一轮可以只说「把第二天换成博物馆」。"
     ),
 )
-async def chat_stream(payload: ChatRequest) -> StreamingResponse:
+async def chat_stream(
+    payload: ChatRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+) -> StreamingResponse:
     """对话式规划(流式)。"""
+    if context is not None:
+        trip = payload.trip
+        if trip is not None:
+            trip = trip.model_copy(update={"user_id": context.user.user_id})
+        payload = payload.model_copy(
+            update={"user_id": context.user.user_id, "trip": trip}
+        )
+
     preview = (payload.message or "").strip()[:40]
     print(f"\n💬 收到对话请求: {preview!r}" + ("(结构化直传)" if payload.trip else ""))
 

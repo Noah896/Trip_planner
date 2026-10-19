@@ -1,9 +1,9 @@
 """旅行规划API路由"""
 
 import json
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ...agents.trip_planner_agent import get_trip_planner_agent, result_message
@@ -19,8 +19,16 @@ from ...services.memory_context import (
     used_memory_payload,
 )
 from ...services.memory_store import get_memory_store
+from ..auth_dependencies import AuthContext, get_auth_context
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
+
+
+def _bind_auth_user(request: TripRequest, context: Optional[AuthContext]) -> TripRequest:
+    """鉴权开启时,用户身份只认 Bearer token。"""
+    if context is None:
+        return request
+    return request.model_copy(update={"user_id": context.user.user_id})
 
 
 def _apply_memory(request: TripRequest) -> tuple[TripRequest, list[UsedMemoryResponse]]:
@@ -73,7 +81,10 @@ def _save_memory(
     summary="生成旅行计划",
     description="根据用户输入的旅行需求,生成详细的旅行计划",
 )
-async def plan_trip(request: TripRequest):
+async def plan_trip(
+    request: TripRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+):
     """
     生成旅行计划
 
@@ -83,8 +94,11 @@ async def plan_trip(request: TripRequest):
     Returns:
         旅行计划响应
     """
+    request = _bind_auth_user(request, context)
+
     try:
         print(f"\n{'=' * 60}")
+
         print("📥 收到旅行规划请求:")
         print(f"   城市: {request.city}")
         print(f"   日期: {request.start_date} - {request.end_date}")
@@ -142,8 +156,12 @@ async def plan_trip(request: TripRequest):
         "`stage`/`label`/`status`/`elapsed`,最后一条是 result(结构同 TripPlanResponse)。"
     ),
 )
-async def plan_trip_stream(request: TripRequest) -> StreamingResponse:
+async def plan_trip_stream(
+    request: TripRequest,
+    context: Optional[AuthContext] = Depends(get_auth_context),
+) -> StreamingResponse:
     """生成旅行计划,并以 SSE 持续推送进度。"""
+    request = _bind_auth_user(request, context)
     agent = get_trip_planner_agent()
 
     planning_request, used_memory = _apply_memory(request)

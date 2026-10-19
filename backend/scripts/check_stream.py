@@ -23,6 +23,8 @@ from pathlib import Path
 
 import httpx
 
+from auth_client import get_auth_headers
+
 BACKEND_URL = os.getenv("TRIP_BACKEND_URL", "http://127.0.0.1:8000")
 STREAM_PATH = "/api/trip/plan/stream"
 
@@ -45,7 +47,17 @@ async def main() -> int:
 
     print(f"POST {BACKEND_URL}{STREAM_PATH}")
     async with httpx.AsyncClient(timeout=300.0) as client:
-        async with client.stream("POST", f"{BACKEND_URL}{STREAM_PATH}", json=PAYLOAD) as response:
+        try:
+            headers = await get_auth_headers(client, BACKEND_URL)
+        except RuntimeError as exc:
+            print(f"❌ {exc}")
+            return 1
+        async with client.stream(
+            "POST",
+            f"{BACKEND_URL}{STREAM_PATH}",
+            json=PAYLOAD,
+            headers=headers,
+        ) as response:
             print(
                 f"HTTP {response.status_code}  "
                 f"content-type={response.headers.get('content-type')}"

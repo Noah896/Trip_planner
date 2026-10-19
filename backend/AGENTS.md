@@ -19,6 +19,10 @@
 | 一键启动前后端 | `powershell -ExecutionPolicy Bypass -File scripts\dev.ps1` |
 | 端口 | 后端 8000 · 前端 5173 · 常驻高德 MCP Server 8001 |
 
+**鉴权提醒**:账号鉴权默认开启。业务接口需要
+`Authorization: Bearer <token>`;验证脚本可设 `TRIP_AUTH_TOKEN`,或同时设
+`TRIP_AUTH_USERNAME` / `TRIP_AUTH_PASSWORD` 自动登录。前端首次使用先注册账号。
+
 **额度提醒**:一次 `POST /api/trip/plan` 会真实调用多次大模型。
 只在必要时跑端到端,跑之前先跟用户说明。
 
@@ -171,6 +175,45 @@ POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同�
 ---
 
 ## 4. 进度日志
+
+### 2026-10-19(真实鉴权:账号 + Bearer token + 前端登录)
+
+补上真实账号鉴权,不再信任客户端随便传的 `user_id`。没有新增依赖。
+
+**后端完成:**
+
+1. 新增 `app/services/auth_service.py`:
+   - 用户名密码账号存 SQLite `data/trip_auth.sqlite3`;
+   - 密码使用 PBKDF2-HMAC-SHA256(随机盐、310k 次迭代);
+   - 登录签发随机 opaque token,数据库只存 token 的 SHA-256;
+   - token 默认 30 天过期,退出登录立即撤销。
+2. 新增 `/api/auth/status|register|login|me|logout`。
+3. `AUTH_ENABLED` 默认 `true`;行程、聊天、记忆接口都必须带
+   `Authorization: Bearer <token>`。
+4. `TripRequest.user_id` / `ChatRequest.user_id` 只保留兼容,鉴权开启时会
+   被 token 对应用户覆盖;`/api/memory/{user_id}` 访问他人 ID 返回 403。
+5. 注册可通过 `AUTH_ALLOW_REGISTRATION` 关闭;非空
+   `AUTH_REGISTRATION_KEY` 时注册必须提供邀请码。生产环境如果开放注册却没设
+   邀请码,启动配置校验会报错。
+6. `tests/conftest.py` 默认为旧功能测试关闭鉴权;`tests/test_auth.py` 显式开启
+   鉴权,覆盖密码校验、令牌撤销、401、越权 403 和客户端 `user_id` 覆盖。
+
+**前端完成:**
+
+1. 新增 `/login` 登录 / 注册页,支持邀请码。
+2. 路由守卫要求先登录;Axios 和 fetch SSE 都自动注入 Bearer token。
+3. 收到 401 自动清除本地登录态并跳转登录页。
+4. 顶栏显示当前用户名并提供退出登录。
+5. `session.ts` 不再生成本地随机 `user_id`;会话 ID 保留,用户身份来自 token。
+   会话 ID 按登录用户分区,且登录态变化会清空 `sessionStorage` 中的上一份
+   行程与记忆回执,避免同一浏览器换账号时串数据。
+
+**验证脚本:** `check_stream.py` / `check_chat.py` / `check_chat_ui.py`
+支持 `TRIP_AUTH_TOKEN`,或 `TRIP_AUTH_USERNAME` + `TRIP_AUTH_PASSWORD` 自动登录。
+
+**验证:** `pytest` 193 → **201 全绿**;`npm run build` 通过。
+
+**仍待补:** 登录失败限流、账号禁用/改密/找回、注册审计和按用户模型配额。
 
 ### 2026-10-19(前端记忆回执:聊天与结果页可见)
 
@@ -912,7 +955,7 @@ LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成�
 
 ## 5. 下一步
 
-### P0 · 记忆系统(三层闭环已完成)
+### P0 · 记忆与鉴权(基础闭环已完成)
 
 > **2026-10-19 进度**:第 1 步“服务端会话 + refine”已完成并提交
 > (`71a0bc1`);`memory_facts` 的事实生命周期与
@@ -920,7 +963,8 @@ LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成�
 > `used_memory` 回执均已完成;`trip_history` 的结构化情景记忆也已完成,
 > 支持“照上次北京那次”并返回 `used_history`。工作 / 长期偏好 / 情景三层闭环
 > 均已完成,前端聊天 / 结果页也已展示记忆回执,**仍然不做向量库**。
-> 下一阶段优先补真实鉴权。
+> 账号密码、Bearer token、前端登录与接口身份绑定也已完成。
+> 下一阶段优先做登录限流、账号生命周期管理和按用户模型配额。
 
 > **2026-10-16 追加**:用户要求增加**聊天式入口**(与表单入口**并重**,不是替换),
 > 并且聊天里要把 LLM 返回的行程数据(天气 / 景点 / 酒店 / 预算)渲染成卡片,

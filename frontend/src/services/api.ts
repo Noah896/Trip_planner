@@ -1,5 +1,8 @@
 import axios from 'axios'
 import type {
+  AuthStatus,
+  AuthTokenResponse,
+  AuthUser,
   ChatEvent,
   ChatTurn,
   TripFormData,
@@ -7,6 +10,7 @@ import type {
   TripProgressEvent,
   TripStreamEvent
 } from '@/types'
+import { clearAuthSession, getAuthToken } from '@/services/auth'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -21,6 +25,10 @@ const apiClient = axios.create({
 // 请求拦截器
 apiClient.interceptors.request.use(
   (config) => {
+    const token = getAuthToken()
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
     console.log('发送请求:', config.method?.toUpperCase(), config.url)
     return config
   },
@@ -38,6 +46,15 @@ apiClient.interceptors.response.use(
   },
   (error) => {
     console.error('响应错误:', error.response?.status, error.message)
+    const url = String(error.config?.url ?? '')
+    const isLoginRequest =
+      url.includes('/api/auth/login') || url.includes('/api/auth/register')
+    if (error.response?.status === 401 && !isLoginRequest) {
+      clearAuthSession()
+      if (window.location.pathname !== '/login') {
+        window.location.assign('/login')
+      }
+    }
     return Promise.reject(error)
   }
 )
@@ -76,17 +93,68 @@ async function readSSE<T>(response: Response, onEvent: (event: T) => void): Prom
 }
 
 async function postStream(path: string, body: unknown): Promise<Response> {
+  const token = getAuthToken()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token) headers.Authorization = `Bearer ${token}`
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body)
   })
 
   if (!response.ok) {
     const detail = await response.text().catch(() => '')
+    if (response.status === 401) {
+      clearAuthSession()
+      if (window.location.pathname !== '/login') {
+        window.location.assign('/login')
+      }
+    }
     throw new Error(detail || `请求失败(${response.status})`)
   }
   return response
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  const response = await apiClient.get<AuthStatus>('/api/auth/status')
+  return response.data
+}
+
+export async function registerAccount(
+  username: string,
+  password: string,
+  registrationKey?: string
+): Promise<AuthTokenResponse> {
+  const response = await apiClient.post<AuthTokenResponse>('/api/auth/register', {
+    username,
+    password,
+    registration_key: registrationKey?.trim() || undefined
+  })
+  return response.data
+}
+
+export async function loginAccount(
+  username: string,
+  password: string
+): Promise<AuthTokenResponse> {
+  const response = await apiClient.post<AuthTokenResponse>('/api/auth/login', {
+    username,
+    password
+  })
+  return response.data
+}
+
+export async function getCurrentUser(): Promise<AuthUser> {
+  const response = await apiClient.get<AuthUser>('/api/auth/me')
+  return response.data
+}
+
+export async function logoutAccount(): Promise<void> {
+  try {
+    await apiClient.post('/api/auth/logout')
+  } finally {
+    clearAuthSession()
+  }
 }
 
 /**

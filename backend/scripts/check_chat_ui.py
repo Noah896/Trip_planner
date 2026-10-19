@@ -28,6 +28,7 @@ import aiohttp
 
 CDP_BASE = os.getenv("CDP_BASE", "http://127.0.0.1:9222")
 PAGE_URL = os.getenv("CHAT_PAGE_URL", "http://localhost:5173/chat")
+BACKEND_URL = os.getenv("TRIP_BACKEND_URL", "http://127.0.0.1:8000")
 MESSAGE = "北京玩三天,下周末出发,带一个六岁小孩"
 PLAN_TIMEOUT = 180.0
 
@@ -66,13 +67,69 @@ async def open_page(session: aiohttp.ClientSession) -> str:
     return target["webSocketDebuggerUrl"]
 
 
+async def browser_auth_script(session: aiohttp.ClientSession) -> str:
+    """返回在页面加载前写入 Bearer 登录态的 JS。"""
+    token = os.getenv("TRIP_AUTH_TOKEN", "").strip()
+    if not token:
+        username = os.getenv("TRIP_AUTH_USERNAME", "").strip()
+        password = os.getenv("TRIP_AUTH_PASSWORD", "")
+        if username and password:
+            async with session.post(
+                f"{BACKEND_URL}/api/auth/login",
+                json={"username": username, "password": password},
+            ) as response:
+                if response.status != 200:
+                    raise RuntimeError(
+                        f"脚本登录失败({response.status}): {await response.text()}"
+                    )
+                token = (await response.json())["access_token"]
+
+    if not token:
+        async with session.get(f"{BACKEND_URL}/api/auth/status") as response:
+            status = await response.json()
+        if not status.get("enabled", True):
+            return ""
+        raise RuntimeError(
+            "后端已开启鉴权。请设置 TRIP_AUTH_TOKEN,"
+            "或同时设置 TRIP_AUTH_USERNAME / TRIP_AUTH_PASSWORD。"
+        )
+
+    async with session.get(
+        f"{BACKEND_URL}/api/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as response:
+        if response.status != 200:
+            raise RuntimeError(
+                f"读取当前用户失败({response.status}): {await response.text()}"
+            )
+        user = await response.json()
+
+    user_json = json.dumps(user, ensure_ascii=False)
+    return f"""
+        localStorage.setItem('tripPlannerAuthToken', {json.dumps(token)});
+        localStorage.setItem('tripPlannerAuthUser', {json.dumps(user_json)});
+        localStorage.removeItem('tripPlannerAuthExpiresAt');
+        localStorage.removeItem('tripPlannerAuthDisabled');
+    """
+
+
 async def main() -> int:
     async with aiohttp.ClientSession() as session:
+        try:
+            auth_script = await browser_auth_script(session)
+        except RuntimeError as exc:
+            print(f"❌ {exc}")
+            return 1
         ws_url = await open_page(session)
         async with session.ws_connect(ws_url, max_msg_size=0) as ws:
             cdp = Cdp(ws)
             await cdp.send("Page.enable")
             await cdp.send("Runtime.enable")
+            if auth_script:
+                await cdp.send(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {"source": auth_script},
+                )
 
             # ---------- 1) 页面能不能挂载 ----------
             await cdp.send("Page.navigate", {"url": PAGE_URL})

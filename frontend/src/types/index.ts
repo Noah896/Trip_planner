@@ -89,6 +89,25 @@ export interface TripFormData {
   free_text_input: string
 }
 
+export interface AuthUser {
+  user_id: string
+  username: string
+  created_at: string
+}
+
+export interface AuthTokenResponse {
+  access_token: string
+  token_type: 'bearer'
+  expires_at: string
+  user: AuthUser
+}
+
+export interface AuthStatus {
+  enabled: boolean
+  registration_enabled: boolean
+  registration_requires_key: boolean
+}
+
 export interface UsedMemoryFact {
   category: string
   key: string
