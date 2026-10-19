@@ -138,6 +138,7 @@ def test_plan_success_response_shape(client: TestClient, install_agent):
     assert body["data"]["city"] == PLACEHOLDER_CITY
     assert len(body["data"]["days"]) == 2
     assert body["data"]["days"][0]["attractions"][0]["location"]["longitude"] == 116.4
+    assert body["used_memory"] == []
 
 
 def test_plan_marks_placeholder_result_as_degraded(client: TestClient, install_agent):

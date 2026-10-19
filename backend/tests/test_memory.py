@@ -8,7 +8,7 @@ import pytest
 
 from app.models.schemas import ChatRequest, TripPlan, TripRequest
 from app.api.routes import trip as trip_routes
-from app.services import chat_service
+from app.services import chat_service, memory_context
 from app.services.chat_service import ChatDecision
 from app.services.memory_store import MemoryAccessError, MemoryStore
 
@@ -197,6 +197,7 @@ def _run_chat(
     decision: Optional[ChatDecision] = None,
 ) -> List[Dict[str, Any]]:
     monkeypatch.setattr(chat_service, "get_memory_store", lambda: store)
+    monkeypatch.setattr(memory_context, "get_memory_store", lambda: store)
     monkeypatch.setattr(chat_service, "get_trip_planner_agent", lambda: planner)
 
     if decision is not None:
@@ -213,6 +214,38 @@ def _run_chat(
 
 
 class TestRunChatMemory:
+    def test_chat_injects_and_saves_long_term_preferences(
+        self, tmp_path, monkeypatch
+    ):
+        store = MemoryStore(tmp_path / "memory.sqlite3")
+        store.upsert_fact(
+            user_id="user-1",
+            category="diet",
+            key="spicy",
+            value="不吃辣",
+            source_text="我不吃辣",
+        )
+        planner = _FakePlanner(_plan())
+        request = ChatRequest(
+            trip=_trip(free_text_input=""),
+            session_id="session-1",
+            user_id="user-1",
+        )
+
+        events = _run_chat(request, monkeypatch, store=store, planner=planner)
+
+        assert planner.calls[0]["trip"].preferences == ["历史文化", "不吃辣"]
+        artifact = next(event for event in events if event["type"] == "artifact")
+        assert artifact["used_memory"][0]["key"] == "spicy"
+        # 回执保留用户本轮原始请求,避免把注入值误当成显式输入再次保存。
+        assert artifact["request"]["preferences"] == ["历史文化"]
+        assert events[-1]["used_memory"][0]["value"] == "不吃辣"
+        saved = {
+            (fact.category, fact.key): fact.value
+            for fact in store.get_facts("user-1")
+        }
+        assert saved[("preference", "pref:历史文化")] == "历史文化"
+
     def test_successful_structured_plan_is_saved(self, tmp_path, monkeypatch):
         store = MemoryStore(tmp_path / "memory.sqlite3")
         planner = _FakePlanner(_plan())
@@ -273,6 +306,7 @@ class TestRunChatMemory:
 
         assert events[-1]["memory_saved"] is False
         assert store.get_session("session-1", user_id="user-1") is None
+        assert store.get_facts("user-1") == []
 
     def test_refine_without_previous_session_asks_again(self, tmp_path, monkeypatch):
         store = MemoryStore(tmp_path / "memory.sqlite3")

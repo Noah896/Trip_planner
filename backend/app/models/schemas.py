@@ -259,6 +259,15 @@ class TripPlan(BaseModel):
         return _coerce_json_container(v)
 
 
+class UsedMemoryResponse(BaseModel):
+    """本轮规划实际注入的一条长期偏好。"""
+
+    category: str = Field(..., description="偏好分类")
+    key: str = Field(..., description="稳定键")
+    value: str = Field(..., description="注入的偏好值")
+    source_text: str = Field(default="", description="原始出处文本")
+
+
 class TripPlanResponse(BaseModel):
     """旅行计划响应"""
     success: bool = Field(..., description="是否成功")
@@ -274,6 +283,9 @@ class TripPlanResponse(BaseModel):
     session_id: Optional[str] = Field(default=None, description="服务端会话 ID")
     memory_saved: bool = Field(default=False, description="本次成功行程是否写入会话记忆")
     memory_version: Optional[int] = Field(default=None, description="写入后的会话版本")
+    used_memory: List[UsedMemoryResponse] = Field(
+        default=[], description="本轮规划实际使用的长期偏好"
+    )
 
 
 class MemoryFactResponse(BaseModel):

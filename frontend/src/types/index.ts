@@ -89,6 +89,13 @@ export interface TripFormData {
   free_text_input: string
 }
 
+export interface UsedMemoryFact {
+  category: string
+  key: string
+  value: string
+  source_text: string
+}
+
 export interface TripPlanResponse {
   success: boolean
   // 为 true 时表示后端返回的是兜底占位行程(AI 规划未成功)
@@ -98,6 +105,7 @@ export interface TripPlanResponse {
   session_id?: string
   memory_saved?: boolean
   memory_version?: number
+  used_memory?: UsedMemoryFact[]
 }
 
 
@@ -124,6 +132,7 @@ export interface TripStreamResult {
   data: TripPlan
   memory_saved?: boolean
   memory_version?: number
+  used_memory?: UsedMemoryFact[]
 }
 
 /** 流中途出错(此时 HTTP 状态码已经是 200,只能靠事件报错) */
@@ -153,6 +162,7 @@ export interface ChatArtifactEvent {
   /** 后端解析出来的条件,后续"改行程"要用 */
   request?: TripFormData
   data: TripPlan
+  used_memory?: UsedMemoryFact[]
 }
 
 export interface ChatDoneEvent {
@@ -161,6 +171,7 @@ export interface ChatDoneEvent {
   session_id?: string
   memory_saved?: boolean
   memory_version?: number
+  used_memory?: UsedMemoryFact[]
 }
 
 export interface ChatErrorEvent {

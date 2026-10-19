@@ -7,10 +7,43 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ...agents.trip_planner_agent import get_trip_planner_agent, result_message
-from ...models.schemas import TripPlan, TripPlanResponse, TripRequest
+from ...models.schemas import (
+    TripPlan,
+    TripPlanResponse,
+    TripRequest,
+    UsedMemoryResponse,
+)
+from ...services.memory_context import (
+    apply_long_term_memory,
+    save_explicit_preferences,
+    used_memory_payload,
+)
 from ...services.memory_store import get_memory_store
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
+
+
+def _apply_memory(request: TripRequest) -> tuple[TripRequest, list[UsedMemoryResponse]]:
+    """读取并注入长期偏好;记忆故障不能阻断正常规划。"""
+    try:
+        application = apply_long_term_memory(request)
+        return application.request, [
+            UsedMemoryResponse(**item)
+            for item in used_memory_payload(application.used_facts)
+        ]
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  长期偏好读取失败,按无记忆继续: {type(exc).__name__}: {exc}")
+        return request, []
+
+
+def _save_preferences(request: TripRequest, *, degraded: bool) -> None:
+    """只把成功规划中的显式偏好写入长期记忆。"""
+    if degraded:
+        return
+    try:
+        save_explicit_preferences(request)
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  长期偏好写入失败: {type(exc).__name__}: {exc}")
 
 
 def _save_memory(
@@ -58,13 +91,15 @@ async def plan_trip(request: TripRequest):
         print(f"   天数: {request.travel_days}")
         print(f"{'=' * 60}\n")
 
+        planning_request, used_memory = _apply_memory(request)
+
         # 获取Agent实例
         print("🔄 获取多智能体系统实例...")
         agent = get_trip_planner_agent()
 
         # 生成旅行计划
         print("🚀 开始生成旅行计划...")
-        outcome = await agent.plan_trip_with_status(request)
+        outcome = await agent.plan_trip_with_status(planning_request)
 
         if outcome.degraded:
             print(f"⚠️  返回降级占位行程: {outcome.reason}\n")
@@ -75,6 +110,8 @@ async def plan_trip(request: TripRequest):
             request, outcome.plan, degraded=outcome.degraded
         )
 
+        _save_preferences(request, degraded=outcome.degraded)
+
         return TripPlanResponse(
             success=True,
             degraded=outcome.degraded,
@@ -83,6 +120,7 @@ async def plan_trip(request: TripRequest):
             session_id=request.session_id,
             memory_saved=memory_saved,
             memory_version=memory_version,
+            used_memory=used_memory,
         )
 
     except Exception as e:
@@ -108,11 +146,13 @@ async def plan_trip_stream(request: TripRequest) -> StreamingResponse:
     """生成旅行计划,并以 SSE 持续推送进度。"""
     agent = get_trip_planner_agent()
 
+    planning_request, used_memory = _apply_memory(request)
+
     print(f"\n📡 收到流式规划请求: {request.city} {request.start_date}~{request.end_date}")
 
     async def event_source() -> AsyncIterator[str]:
         try:
-            async for event in agent.plan_trip_stream(request):
+            async for event in agent.plan_trip_stream(planning_request):
                 if event.get("type") == "result" and event.get("data"):
                     plan = TripPlan.model_validate(event["data"])
                     memory_saved, memory_version = _save_memory(
@@ -120,8 +160,15 @@ async def plan_trip_stream(request: TripRequest) -> StreamingResponse:
                         plan,
                         degraded=bool(event.get("degraded", False)),
                     )
+                    _save_preferences(
+                        request, degraded=bool(event.get("degraded", False))
+                    )
                     event["memory_saved"] = memory_saved
                     event["memory_version"] = memory_version
+                if event.get("type") == "result":
+                    event["used_memory"] = [
+                        item.model_dump(mode="json") for item in used_memory
+                    ]
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:  # noqa: BLE001 - 流已经开始,只能把错误推给前端
             print(f"❌ 流式规划中断: {type(exc).__name__}: {exc}")

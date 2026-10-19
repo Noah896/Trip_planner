@@ -29,6 +29,11 @@ from ..agents.trip_planner_agent import get_trip_planner_agent
 from ..config import get_settings
 from ..models.schemas import ChatMessage, ChatRequest, TripPlan, TripRequest
 from .llm_service import get_llm
+from .memory_context import (
+    apply_long_term_memory,
+    save_explicit_preferences,
+    used_memory_payload,
+)
 from .memory_store import (
     MemoryAccessError,
     SessionMemory,
@@ -187,6 +192,8 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 2. **没提到的字段一律留空,不要编造**。交通、住宿留空时下游会兜底成
    "公共交通 / 经济型酒店"。
 3. preferences 是偏好标签数组,例如 ["历史文化", "美食", "亲子"]。
+   用户明确说"不吃辣 / 素食 / 带小孩 / 节奏轻松"这类可跨行程复用的条件时,
+   也要写进 preferences;只写用户明确表达的内容,不要根据常识替他补偏好。
 4. 用户在补充信息时,结合对话历史把条件合并齐,别丢掉之前说过的。
 5. **用户点名要去的地方必须填进 `must_visit`**。典型场景:你上一轮推荐了几个景点,
    用户回了一句"就去故宫""第一个吧""兵马俑"—— 那就要把 **完整的名称**(如
@@ -530,6 +537,16 @@ def _with_identity(
     )
 
 
+def _apply_memory(trip: TripRequest) -> tuple[TripRequest, List[Dict[str, Any]]]:
+    """规划前注入长期偏好;读取失败时退化为无记忆请求。"""
+    try:
+        application = apply_long_term_memory(trip)
+        return application.request, used_memory_payload(application.used_facts)
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  对话规划读取长期偏好失败: {type(exc).__name__}: {exc}")
+        return trip, []
+
+
 async def decide_streaming(
     message: str,
     history: Sequence[ChatMessage],
@@ -718,11 +735,12 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
             return
 
     # ---- 到这里就复用现有流水线:检索(确定性)+ 规划(唯一那次模型调用) ----
+    planning_trip, used_memory = _apply_memory(trip)
     planner = get_trip_planner_agent()
     stream = (
-        planner.plan_trip_stream(trip, previous_plan=previous_plan)
+        planner.plan_trip_stream(planning_trip, previous_plan=previous_plan)
         if previous_plan is not None
-        else planner.plan_trip_stream(trip)
+        else planner.plan_trip_stream(planning_trip)
     )
     memory_saved = False
     memory_version: Optional[int] = None
@@ -755,6 +773,12 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
                     # 记忆写入失败不能吞掉已经生成好的行程,但要明确告诉客户端没保存。
                     print(f"⚠️  会话记忆写入失败: {type(exc).__name__}: {exc}")
 
+            if not event.get("degraded", False) and event.get("data"):
+                try:
+                    save_explicit_preferences(trip)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"⚠️  长期偏好写入失败: {type(exc).__name__}: {exc}")
+
             yield {
                 "type": "artifact",
                 "kind": "trip_plan",
@@ -765,6 +789,7 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
                 "request": trip.model_dump(mode="json"),
                 "data": event.get("data"),
                 "memory_saved": memory_saved,
+                "used_memory": used_memory,
             }
         else:
             yield event
@@ -775,4 +800,5 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
         "session_id": session_id or None,
         "memory_saved": memory_saved,
         "memory_version": memory_version,
+        "used_memory": used_memory,
     }

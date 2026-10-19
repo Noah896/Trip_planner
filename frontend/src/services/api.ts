@@ -127,7 +127,8 @@ export async function generateTripPlanStream(
         message: event.message,
         data: event.data,
         memory_saved: event.memory_saved,
-        memory_version: event.memory_version
+        memory_version: event.memory_version,
+        used_memory: event.used_memory
       }
     } else if (event.type === 'error') {
       throw new Error(event.message || '生成旅行计划失败')
