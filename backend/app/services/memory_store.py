@@ -62,6 +62,22 @@ class MemoryFact:
 
 
 @dataclass(frozen=True)
+class HistoryMemory:
+    """一条可复用的成功行程(情景记忆)。"""
+
+    id: int
+    user_id: str
+    session_id: str
+    city: str
+    start_date: str
+    end_date: str
+    request: Dict[str, Any]
+    plan: Dict[str, Any]
+    preferences: List[str]
+    created_at: str
+
+
+@dataclass(frozen=True)
 class MemoryDeletion:
     """删除一个用户全部记忆后的计数。"""
 
@@ -367,6 +383,57 @@ class MemoryStore:
                 params,
             ).fetchall()
         return [self._row_to_fact(row) for row in rows]
+
+    def get_trip_history(
+        self,
+        user_id: str,
+        *,
+        city: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[HistoryMemory]:
+        """按用户读取最近的成功行程,可选按城市精确过滤。"""
+        user_id = (user_id or "").strip()
+        if not user_id:
+            return []
+
+        bounded_limit = max(1, min(int(limit), 50))
+        clauses = ["user_id = ?", "degraded = 0"]
+        params: List[Any] = [user_id]
+        city = (city or "").strip()
+        if city:
+            clauses.append("city = ?")
+            params.append(city)
+        params.append(bounded_limit)
+
+        self._ensure_schema()
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, user_id, session_id, city, start_date, end_date,
+                       request_json, plan_json, preference_snapshot, created_at
+                FROM trip_history
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+        return [
+            HistoryMemory(
+                id=int(row["id"]),
+                user_id=row["user_id"],
+                session_id=row["session_id"],
+                city=row["city"],
+                start_date=row["start_date"] or "",
+                end_date=row["end_date"] or "",
+                request=json.loads(row["request_json"]),
+                plan=json.loads(row["plan_json"]),
+                preferences=list(json.loads(row["preference_snapshot"])),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
 
     def upsert_fact(
         self,

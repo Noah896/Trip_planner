@@ -268,6 +268,17 @@ class UsedMemoryResponse(BaseModel):
     source_text: str = Field(default="", description="原始出处文本")
 
 
+class HistoryUsageResponse(BaseModel):
+    """本轮规划引用的历史行程摘要。"""
+
+    history_id: int = Field(..., description="历史行程 ID")
+    city: str = Field(..., description="历史目的地城市")
+    start_date: str = Field(..., description="历史出发日期")
+    end_date: str = Field(..., description="历史返程日期")
+    travel_days: int = Field(..., description="历史旅行天数")
+    preferences: List[str] = Field(default=[], description="历史偏好快照")
+
+
 class TripPlanResponse(BaseModel):
     """旅行计划响应"""
     success: bool = Field(..., description="是否成功")
@@ -285,6 +296,9 @@ class TripPlanResponse(BaseModel):
     memory_version: Optional[int] = Field(default=None, description="写入后的会话版本")
     used_memory: List[UsedMemoryResponse] = Field(
         default=[], description="本轮规划实际使用的长期偏好"
+    )
+    used_history: Optional[HistoryUsageResponse] = Field(
+        default=None, description="本轮规划引用的历史行程"
     )
 
 

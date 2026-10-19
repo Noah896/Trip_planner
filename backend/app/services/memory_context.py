@@ -11,7 +11,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..models.schemas import TripRequest
-from .memory_store import MemoryFact, MemoryStore, get_memory_store
+from .memory_store import (
+    HistoryMemory,
+    MemoryFact,
+    MemoryStore,
+    get_memory_store,
+)
 
 
 @dataclass(frozen=True)
@@ -40,8 +45,32 @@ class MemoryApplication:
     used_facts: List[MemoryFact]
 
 
+@dataclass(frozen=True)
+class HistoryRecall:
+    """一次历史行程召回的结果。"""
+
+    requested: bool
+    selected: Optional[HistoryMemory]
+    candidates: List[HistoryMemory]
+
+
 _WHITESPACE = re.compile(r"\s+")
 _MAX_FACT_TEXT = 80
+_HISTORY_REFERENCE_PHRASES = (
+    "照上次",
+    "按照上次",
+    "像上次",
+    "和上次一样",
+    "跟上次一样",
+    "上次去",
+    "上一次",
+    "上次",
+    "之前去",
+    "那次",
+    "那次行程",
+    "再来一份",
+    "再去一次",
+)
 
 # 只收录具有跨行程复用价值、且用户说法足够明确的规则。
 # 遍历顺序有意义:"不吃辣"必须排在"吃辣"前面。
@@ -91,6 +120,91 @@ def _match_rule(text: str) -> Optional[ExplicitPreference]:
                 source_text=text,
             )
     return None
+
+
+def _history_reference_positions(text: str) -> List[int]:
+    positions: List[int] = []
+    for phrase in _HISTORY_REFERENCE_PHRASES:
+        start = 0
+        while True:
+            index = text.find(phrase, start)
+            if index < 0:
+                break
+            positions.append(index)
+            start = index + len(phrase)
+    return positions
+
+
+def recall_trip_history(
+    user_id: Optional[str],
+    texts: List[str],
+    *,
+    store: Optional[MemoryStore] = None,
+    limit: int = 10,
+) -> HistoryRecall:
+    """识别"上次/之前"类表述,并确定性地选出最匹配的历史行程。
+
+    用户点名城市时,按城市与"上次"等词的距离选最近的一次;否则取最新成功行程。
+    不调用模型,也不做向量相似度。
+    """
+    normalized_texts = []
+    for text in texts:
+        normalized = _normalize_text(text)
+        if normalized:
+            normalized_texts.append(normalized)
+    combined = "\n".join(normalized_texts)
+    reference_positions = _history_reference_positions(combined)
+    if not reference_positions:
+        return HistoryRecall(requested=False, selected=None, candidates=[])
+
+    owner = (user_id or "").strip()
+    if not owner:
+        return HistoryRecall(requested=True, selected=None, candidates=[])
+
+    memory_store = store or get_memory_store()
+    histories = memory_store.get_trip_history(owner, limit=limit)
+    if not histories:
+        return HistoryRecall(requested=True, selected=None, candidates=[])
+
+    city_scores = []
+    for history in histories:
+        city = (history.city or "").strip()
+        if not city:
+            continue
+        city_positions = []
+        start = 0
+        while True:
+            index = combined.find(city, start)
+            if index < 0:
+                break
+            city_positions.append(index)
+            start = index + len(city)
+        if city_positions:
+            distance = min(
+                abs(city_pos - reference_pos)
+                for city_pos in city_positions
+                for reference_pos in reference_positions
+            )
+            city_scores.append((distance, history))
+
+    if city_scores:
+        best_distance = min(score for score, _ in city_scores)
+        matching_ids = {
+            history.id for score, history in city_scores if score == best_distance
+        }
+        ordered = [
+            history for history in histories if history.id in matching_ids
+        ] + [
+            history for history in histories if history.id not in matching_ids
+        ]
+    else:
+        ordered = list(histories)
+
+    return HistoryRecall(
+        requested=True,
+        selected=ordered[0] if ordered else None,
+        candidates=ordered[:3],
+    )
 
 
 def extract_explicit_preferences(request: TripRequest) -> List[ExplicitPreference]:
@@ -229,3 +343,18 @@ def used_memory_payload(facts: List[MemoryFact]) -> List[Dict[str, Any]]:
         }
         for fact in facts
     ]
+
+
+def used_history_payload(history: Optional[HistoryMemory]) -> Optional[Dict[str, Any]]:
+    """生成聊天回执里的历史行程摘要。"""
+    if history is None:
+        return None
+    request = history.request
+    return {
+        "history_id": history.id,
+        "city": history.city,
+        "start_date": history.start_date,
+        "end_date": history.end_date,
+        "travel_days": int(request.get("travel_days") or 0),
+        "preferences": list(request.get("preferences") or []),
+    }

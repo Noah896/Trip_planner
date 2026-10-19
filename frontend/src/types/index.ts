@@ -96,6 +96,15 @@ export interface UsedMemoryFact {
   source_text: string
 }
 
+export interface HistoryUsage {
+  history_id: number
+  city: string
+  start_date: string
+  end_date: string
+  travel_days: number
+  preferences: string[]
+}
+
 export interface TripPlanResponse {
   success: boolean
   // 为 true 时表示后端返回的是兜底占位行程(AI 规划未成功)
@@ -106,6 +115,7 @@ export interface TripPlanResponse {
   memory_saved?: boolean
   memory_version?: number
   used_memory?: UsedMemoryFact[]
+  used_history?: HistoryUsage | null
 }
 
 
@@ -163,6 +173,7 @@ export interface ChatArtifactEvent {
   request?: TripFormData
   data: TripPlan
   used_memory?: UsedMemoryFact[]
+  used_history?: HistoryUsage | null
 }
 
 export interface ChatDoneEvent {
@@ -172,6 +183,7 @@ export interface ChatDoneEvent {
   memory_saved?: boolean
   memory_version?: number
   used_memory?: UsedMemoryFact[]
+  used_history?: HistoryUsage | null
 }
 
 export interface ChatErrorEvent {

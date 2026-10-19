@@ -30,11 +30,15 @@ from ..config import get_settings
 from ..models.schemas import ChatMessage, ChatRequest, TripPlan, TripRequest
 from .llm_service import get_llm
 from .memory_context import (
+    HistoryRecall,
     apply_long_term_memory,
+    recall_trip_history,
     save_explicit_preferences,
+    used_history_payload,
     used_memory_payload,
 )
 from .memory_store import (
+    HistoryMemory,
     MemoryAccessError,
     SessionMemory,
     get_memory_store,
@@ -212,6 +216,16 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 
 **没有「上一版行程」时绝对不能返回 `refine`**。
 
+**历史行程参考(当上下文里出现「可参考的历史行程」时):**
+
+1. 用户可以要求"照上次北京那次的风格再来一份"。历史行程里的城市、天数、
+   交通、住宿、偏好和必去项可以作为默认值,用户本轮明确改变的内容优先。
+2. **历史日期只能用于识别那次行程,绝不能直接当成这次出发日期**。
+   用户这次必须明确给出新的时间;没给就返回 `clarify` 并追问出发日期。
+3. 如果用户这次指定了不同城市,只参考历史偏好和节奏,不要把旧城市的必去景点
+   带过去。
+4. 不要编造历史行程;只能使用上下文中实际列出的候选。
+
 **reply 字段**(用一句自然、简短的中文):
 - intent=plan:复述你理解到的需求,例如"好的,北京 3 天,10-16 出发,我这就开始规划";
 - intent=refine:复述这次要改什么,并说明其余部分保持;
@@ -353,12 +367,40 @@ def _format_session_context(session: SessionMemory) -> str:
     return "\n".join(lines)
 
 
+def _format_history_recall(recall: HistoryRecall) -> str:
+    """把确定性召回的历史候选压缩成意图识别上下文。"""
+    if not recall.requested:
+        return ""
+    if recall.selected is None or not recall.candidates:
+        return "【可参考的历史行程】\n- 未找到可复用的成功行程"
+
+    lines = ["【可参考的历史行程】"]
+    for index, history in enumerate(recall.candidates):
+        marker = "最匹配" if index == 0 else f"候选{index + 1}"
+        try:
+            request = TripRequest.model_validate(history.request)
+            preferences = "、".join(request.preferences) or "无"
+            must_visit = "、".join(request.must_visit) or "无"
+            travel_days = request.travel_days
+        except Exception:  # noqa: BLE001 - 旧数据也应只跳过,不能拖垮对话
+            preferences = "未知"
+            must_visit = "未知"
+            travel_days = 0
+        lines.append(
+            f"- {marker}:{history.city},{history.start_date} 至 {history.end_date},"
+            f"{travel_days}天;偏好 {preferences};必去 {must_visit}"
+        )
+    lines.append("- 这些日期只用于识别旧行程,本轮日期必须重新询问或采用用户新说法。")
+    return "\n".join(lines)
+
+
 def _format_context(
     message: str,
     history: Sequence[ChatMessage],
     today: date,
     *,
     session: Optional[SessionMemory] = None,
+    history_recall: Optional[HistoryRecall] = None,
 ) -> str:
     """把"今天 + 上一版行程 + 对话历史 + 最新一句"拼成一次调用的输入。
 
@@ -368,6 +410,10 @@ def _format_context(
 
     if session is not None:
         lines.append(_format_session_context(session))
+        lines.append("")
+
+    if history_recall is not None and history_recall.requested:
+        lines.append(_format_history_recall(history_recall))
         lines.append("")
 
     recent = list(history)[-MAX_HISTORY:]
@@ -454,6 +500,65 @@ def build_trip_request(
     except Exception as exc:  # noqa: BLE001 - 拼不出来就退回追问,别让请求 500
         print(f"⚠️  槽位拼不成 TripRequest: {type(exc).__name__}: {exc}")
         return None
+
+
+def build_trip_request_from_history(
+    decision: ChatDecision,
+    history: HistoryMemory,
+    *,
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    user_context: Optional[str] = None,
+) -> Optional[TripRequest]:
+    """用历史行程补齐默认槽位,但日期必须来自用户本轮的新说法。
+
+    历史城市 / 天数 / 交通 / 住宿 / 偏好 / 必去项可以作为默认值;旧的
+    ``start_date`` / ``end_date`` 绝不直接复用,否则会在用户不知情时生成一份
+    日期已经过去的行程。
+    """
+    try:
+        historical = TripRequest.model_validate(history.request)
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  历史行程数据无法复用: {type(exc).__name__}: {exc}")
+        return None
+    city = (decision.city or historical.city or "").strip()
+    same_city = city == historical.city.strip()
+    if user_context and not re.search(
+        r"(明天|后天|下周|本周|这周|周末|礼拜|下个?月|月底|月初|"
+        r"国庆|春节|元旦|假期|天后|周后|个月后|"
+        r"\d{1,2}\s*[月./-]\s*\d{1,2}|\d{1,2}\s*[号日])",
+        user_context,
+    ):
+        # 模型可能把上下文里的旧日期抄回来。用户本轮没有任何新时间表达时,
+        # 清掉日期,让后续流程明确追问,而不是生成一份日期过期的行程。
+        decision = decision.model_copy(update={"start_date": None, "end_date": None})
+
+    preferences = _dedupe([*historical.preferences, *decision.preferences])
+    if same_city:
+        must_visit = _dedupe([*historical.must_visit, *decision.must_visit])
+    else:
+        must_visit = _dedupe(decision.must_visit)
+
+    reference_note = (
+        f"参考上次{historical.city}行程的偏好和节奏,按本次日期重新安排"
+    )
+    free_text = _dedupe(
+        [reference_note, decision.free_text_input]
+    )
+    merged = decision.model_copy(
+        update={
+            "city": city,
+            "travel_days": decision.travel_days or historical.travel_days,
+            "transportation": decision.transportation or historical.transportation,
+            "accommodation": decision.accommodation or historical.accommodation,
+            "preferences": preferences,
+            "must_visit": must_visit,
+            "free_text_input": "；".join(free_text),
+        }
+    )
+    return build_trip_request(
+        merged, session_id=session_id, user_id=user_id
+    )
 
 
 def _dedupe(values: Sequence[str]) -> List[str]:
@@ -554,6 +659,7 @@ async def decide_streaming(
     today: Optional[date] = None,
     model: Any = None,
     session: Optional[SessionMemory] = None,
+    history_recall: Optional[HistoryRecall] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """判断意图、抽取槽位(**一次**模型调用),同时把回复逐字流出去。
 
@@ -571,7 +677,11 @@ async def decide_streaming(
         {
             "role": "user",
             "content": _format_context(
-                message, history, today or date.today(), session=session
+                message,
+                history,
+                today or date.today(),
+                session=session,
+                history_recall=history_recall,
             ),
         },
     ]
@@ -634,10 +744,13 @@ async def decide(
     *,
     today: Optional[date] = None,
     session: Optional[SessionMemory] = None,
+    history_recall: Optional[HistoryRecall] = None,
 ) -> ChatDecision:
     """只要判断结果、不要流式时的便捷封装(测试和内部调用用)。"""
     decision = _fallback_decision()
-    async for item in decide_streaming(message, history, today=today, session=session):
+    async for item in decide_streaming(
+        message, history, today=today, session=session, history_recall=history_recall
+    ):
         if "decision" in item:
             decision = item["decision"]
     return decision
@@ -669,19 +782,35 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
             )
         except MemoryAccessError as exc:
             raise RuntimeError(str(exc)) from exc
+        if previous_memory is not None and not user_id:
+            user_id = previous_memory.user_id
 
     trip = _with_identity(request.trip, session_id=session_id, user_id=user_id) if request.trip else None
     previous_plan: Optional[TripPlan] = None
     is_refine = False
+    history_recall: Optional[HistoryRecall] = None
+    history_template: Optional[HistoryMemory] = None
 
     if trip is None:
         decision: Optional[ChatDecision] = None
+        user_texts = [
+            request.message,
+            *[item.content for item in request.history if item.role == "user"],
+        ]
+        try:
+            history_recall = recall_trip_history(user_id or None, user_texts)
+            history_template = history_recall.selected
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️  历史行程召回失败,按普通规划继续: {type(exc).__name__}: {exc}")
 
         # 助手这次要说的话是**边生成边流出去的** —— 每个 message 事件是一段增量,
         # 前端负责追加。虽然流式不好再"撤回",但用户能看到字在往外冒,
         # 而不是盯着空气泡等十几秒。
         async for item in decide_streaming(
-            request.message, request.history, session=previous_memory
+            request.message,
+            request.history,
+            session=previous_memory,
+            history_recall=history_recall,
         ):
             if "delta" in item:
                 yield {"type": "message", "text": item["delta"]}
@@ -692,7 +821,7 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
             decision = _fallback_decision()
             yield {"type": "message", "text": decision.reply}
 
-        if decision.intent == "refine":
+        if decision.intent == "refine" and history_template is None:
             if previous_memory is None:
                 yield {
                     "type": "message",
@@ -718,11 +847,19 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
                 return
             previous_plan = TripPlan.model_validate(previous_memory.plan)
             is_refine = True
-        elif decision.intent != "plan":
+        elif decision.intent not in {"plan", "refine"}:
             yield {"type": "done"}
             return
 
-        if not is_refine:
+        if history_template is not None:
+            trip = build_trip_request_from_history(
+                decision,
+                history_template,
+                session_id=session_id or None,
+                user_id=user_id or None,
+                user_context="\n".join(user_texts),
+            )
+        elif not is_refine:
             trip = build_trip_request(
                 decision, session_id=session_id or None, user_id=user_id or None
             )
@@ -735,6 +872,7 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
             return
 
     # ---- 到这里就复用现有流水线:检索(确定性)+ 规划(唯一那次模型调用) ----
+    used_history = used_history_payload(history_template)
     planning_trip, used_memory = _apply_memory(trip)
     planner = get_trip_planner_agent()
     stream = (
@@ -790,6 +928,7 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
                 "data": event.get("data"),
                 "memory_saved": memory_saved,
                 "used_memory": used_memory,
+                "used_history": used_history,
             }
         else:
             yield event
@@ -801,4 +940,5 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
         "memory_saved": memory_saved,
         "memory_version": memory_version,
         "used_memory": used_memory,
+        "used_history": used_history,
     }

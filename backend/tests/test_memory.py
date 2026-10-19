@@ -214,6 +214,47 @@ def _run_chat(
 
 
 class TestRunChatMemory:
+    def test_chat_can_reuse_a_named_historical_trip(
+        self, tmp_path, monkeypatch
+    ):
+        store = MemoryStore(tmp_path / "memory.sqlite3")
+        store.save_successful_plan(
+            session_id="old-session",
+            user_id="user-1",
+            request=_trip(
+                session_id="old-session",
+                must_visit=["故宫博物院"],
+            ),
+            plan=_plan(),
+        )
+        planner = _FakePlanner(_plan())
+        decision = ChatDecision(
+            intent="plan",
+            reply="好的,参考上次北京行程",
+            start_date="2026-11-01",
+            preferences=["亲子"],
+        )
+
+        events = _run_chat(
+            ChatRequest(
+                message="照上次北京那次再来一份,11月1日出发",
+                user_id="user-1",
+            ),
+            monkeypatch,
+            store=store,
+            planner=planner,
+            decision=decision,
+        )
+
+        planned = planner.calls[0]["trip"]
+        assert planned.city == "北京"
+        assert planned.start_date == date(2026, 11, 1)
+        assert planned.end_date == date(2026, 11, 3)
+        assert planned.must_visit == ["故宫博物院"]
+        artifact = next(event for event in events if event["type"] == "artifact")
+        assert artifact["used_history"]["city"] == "北京"
+        assert events[-1]["used_history"]["travel_days"] == 3
+
     def test_chat_injects_and_saves_long_term_preferences(
         self, tmp_path, monkeypatch
     ):

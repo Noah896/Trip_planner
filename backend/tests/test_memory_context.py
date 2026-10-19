@@ -10,6 +10,8 @@ from app.api.main import app
 from app.api.routes import trip as trip_routes
 from app.models.schemas import TripPlan, TripRequest
 from app.services import memory_context
+from app.services import chat_service
+from app.services.chat_service import ChatDecision, build_trip_request_from_history
 from app.services.memory_store import MemoryStore
 
 
@@ -29,15 +31,17 @@ def _trip(**overrides: Any) -> TripRequest:
     return TripRequest(**payload)
 
 
-def _plan() -> TripPlan:
-    return TripPlan(
-        city="北京",
-        start_date="2026-10-16",
-        end_date="2026-10-18",
-        days=[],
-        weather_info=[],
-        overall_suggestions="测试行程",
-    )
+def _plan(**overrides: Any) -> TripPlan:
+    payload = {
+        "city": "北京",
+        "start_date": "2026-10-16",
+        "end_date": "2026-10-18",
+        "days": [],
+        "weather_info": [],
+        "overall_suggestions": "测试行程",
+    }
+    payload.update(overrides)
+    return TripPlan(**payload)
 
 
 class _RecordingAgent:
@@ -133,6 +137,162 @@ class TestPreferenceInjection:
             for fact in store.get_facts("user-1")
         }
         assert active[("diet", "spicy")] == "吃辣"
+
+
+class TestHistoryRecall:
+    def _store_with_history(self, tmp_path) -> MemoryStore:
+        store = MemoryStore(tmp_path / "memory.sqlite3")
+        store.save_successful_plan(
+            session_id="beijing-session",
+            user_id="user-1",
+            request=_trip(
+                session_id="beijing-session",
+                preferences=["历史文化"],
+                must_visit=["故宫博物院"],
+            ),
+            plan=_plan(),
+        )
+        store.save_successful_plan(
+            session_id="shanghai-session",
+            user_id="user-1",
+            request=_trip(
+                city="上海",
+                start_date=date(2026, 10, 20),
+                end_date=date(2026, 10, 22),
+                travel_days=3,
+                preferences=["美食"],
+                session_id="shanghai-session",
+            ),
+            plan=_plan(
+                city="上海",
+                start_date="2026-10-20",
+                end_date="2026-10-22",
+            ),
+        )
+        return store
+
+    def test_city_name_selects_matching_history(self, tmp_path):
+        store = self._store_with_history(tmp_path)
+
+        recall = memory_context.recall_trip_history(
+            "user-1", ["照上次北京那次再来一份"], store=store
+        )
+
+        assert recall.requested is True
+        assert recall.selected is not None
+        assert recall.selected.city == "北京"
+        context = chat_service._format_history_recall(recall)
+        assert "最匹配:北京" in context
+        assert "本轮日期必须重新询问" in context
+
+    def test_latest_history_is_default_when_city_is_not_named(self, tmp_path):
+        store = self._store_with_history(tmp_path)
+
+        recall = memory_context.recall_trip_history(
+            "user-1", ["照上次再来一份"], store=store
+        )
+
+        assert recall.selected is not None
+        assert recall.selected.city == "上海"
+
+    def test_no_reference_phrase_does_not_read_history(self, tmp_path):
+        store = self._store_with_history(tmp_path)
+
+        recall = memory_context.recall_trip_history(
+            "user-1", ["我想去成都玩三天"], store=store
+        )
+
+        assert recall.requested is False
+        assert recall.selected is None
+
+    def test_missing_user_has_no_history_candidates(self, tmp_path):
+        store = self._store_with_history(tmp_path)
+
+        recall = memory_context.recall_trip_history(
+            None, ["照上次北京那次再来一份"], store=store
+        )
+
+        assert recall.requested is True
+        assert recall.selected is None
+
+
+class TestHistoryTripBuilder:
+    def _history(self, tmp_path):
+        store = MemoryStore(tmp_path / "memory.sqlite3")
+        store.save_successful_plan(
+            session_id="beijing-session",
+            user_id="user-1",
+            request=_trip(
+                session_id="beijing-session",
+                preferences=["历史文化"],
+                must_visit=["故宫博物院"],
+            ),
+            plan=_plan(),
+        )
+        return store.get_trip_history("user-1")[0]
+
+    def test_reuses_style_but_requires_a_new_date(self, tmp_path):
+        history = self._history(tmp_path)
+        decision = ChatDecision(
+            intent="plan",
+            reply="好的",
+            start_date="2026-11-01",
+            preferences=["亲子"],
+        )
+
+        trip = build_trip_request_from_history(decision, history)
+
+        assert trip is not None
+        assert trip.city == "北京"
+        assert trip.start_date == date(2026, 11, 1)
+        assert trip.end_date == date(2026, 11, 3)
+        assert trip.travel_days == 3
+        assert trip.preferences == ["历史文化", "亲子"]
+        assert trip.must_visit == ["故宫博物院"]
+        assert "参考上次北京" in trip.free_text_input
+
+    def test_old_history_date_is_never_reused(self, tmp_path):
+        history = self._history(tmp_path)
+
+        trip = build_trip_request_from_history(
+            ChatDecision(intent="plan", reply="好的"), history
+        )
+
+        assert trip is None
+
+    def test_copied_old_date_is_cleared_without_fresh_time_cue(self, tmp_path):
+        history = self._history(tmp_path)
+        decision = ChatDecision(
+            intent="plan",
+            reply="好的",
+            start_date="2026-10-16",
+            end_date="2026-10-18",
+        )
+
+        trip = build_trip_request_from_history(
+            decision,
+            history,
+            user_context="照上次北京那次再来一份",
+        )
+
+        assert trip is None
+
+    def test_different_city_does_not_carry_old_must_visit(self, tmp_path):
+        history = self._history(tmp_path)
+        decision = ChatDecision(
+            intent="plan",
+            reply="好的",
+            city="上海",
+            start_date="2026-11-01",
+            must_visit=["外滩"],
+        )
+
+        trip = build_trip_request_from_history(decision, history)
+
+        assert trip is not None
+        assert trip.city == "上海"
+        assert trip.must_visit == ["外滩"]
+        assert trip.preferences == ["历史文化"]
 
 
 class TestFormRouteMemory:
