@@ -7,9 +7,31 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from ...agents.trip_planner_agent import get_trip_planner_agent, result_message
-from ...models.schemas import TripPlanResponse, TripRequest
+from ...models.schemas import TripPlan, TripPlanResponse, TripRequest
+from ...services.memory_store import get_memory_store
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
+
+
+def _save_memory(
+    request: TripRequest, plan: TripPlan, *, degraded: bool
+) -> tuple[bool, int | None]:
+    """把正常的表单规划写入会话记忆;失败不影响已经生成好的结果。"""
+    if not request.session_id or degraded:
+        return False, None
+    try:
+        saved = get_memory_store().save_successful_plan(
+            session_id=request.session_id,
+            user_id=request.user_id,
+            request=request,
+            plan=plan,
+            last_message=request.free_text_input or "",
+            reset_base=True,
+        )
+        return True, saved.version
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  表单规划写入会话记忆失败: {type(exc).__name__}: {exc}")
+        return False, None
 
 
 @router.post(
@@ -49,11 +71,18 @@ async def plan_trip(request: TripRequest):
         else:
             print("✅ 旅行计划生成成功,准备返回响应\n")
 
+        memory_saved, memory_version = _save_memory(
+            request, outcome.plan, degraded=outcome.degraded
+        )
+
         return TripPlanResponse(
             success=True,
             degraded=outcome.degraded,
             message=result_message(outcome.degraded),
             data=outcome.plan,
+            session_id=request.session_id,
+            memory_saved=memory_saved,
+            memory_version=memory_version,
         )
 
     except Exception as e:
@@ -84,6 +113,15 @@ async def plan_trip_stream(request: TripRequest) -> StreamingResponse:
     async def event_source() -> AsyncIterator[str]:
         try:
             async for event in agent.plan_trip_stream(request):
+                if event.get("type") == "result" and event.get("data"):
+                    plan = TripPlan.model_validate(event["data"])
+                    memory_saved, memory_version = _save_memory(
+                        request,
+                        plan,
+                        degraded=bool(event.get("degraded", False)),
+                    )
+                    event["memory_saved"] = memory_saved
+                    event["memory_version"] = memory_version
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as exc:  # noqa: BLE001 - 流已经开始,只能把错误推给前端
             print(f"❌ 流式规划中断: {type(exc).__name__}: {exc}")

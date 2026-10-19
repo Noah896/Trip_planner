@@ -63,6 +63,7 @@ import { nextTick, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import TripPlanView from '@/components/TripPlanView.vue'
 import { chatStream } from '@/services/api'
+import { getMemoryIdentity } from '@/services/session'
 import type { ChatTurn, TripPlan, TripProgressEvent } from '@/types'
 
 type StageStatus = 'pending' | 'running' | 'done'
@@ -83,6 +84,7 @@ interface ChatBubble {
 }
 
 const router = useRouter()
+const memoryIdentity = getMemoryIdentity()
 
 // 这四步是后端进度事件里会出现的阶段(与 NODE_LABELS 对应)。
 // 一开始就按"等待中"列出来,免得前 10 秒界面看着像死了。
@@ -167,7 +169,12 @@ const send = async () => {
 
   try {
     await chatStream(
-      { message: text, history: historyBefore },
+      {
+        message: text,
+        history: historyBefore,
+        session_id: memoryIdentity.session_id,
+        user_id: memoryIdentity.user_id
+      },
       {
         onMessage: (chunk) => {
           // message 事件是**逐字流出来的增量**(后端边生成边推),

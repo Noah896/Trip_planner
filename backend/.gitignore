@@ -45,6 +45,10 @@ ENV/
 .coverage
 htmlcov/
 
+# 本地记忆数据库
+data/*.sqlite3
+data/*.sqlite3-*
+
 # 操作系统
 .DS_Store
 Thumbs.db

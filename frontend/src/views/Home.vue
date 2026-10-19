@@ -227,6 +227,7 @@ import { ref, reactive, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { generateTripPlanStream } from '@/services/api'
+import { getMemoryIdentity } from '@/services/session'
 import type { TripFormData, TripProgressEvent } from '@/types'
 import type { Dayjs } from 'dayjs'
 
@@ -362,7 +363,8 @@ const handleSubmit = async () => {
       transportation: formData.transportation,
       accommodation: formData.accommodation,
       preferences: formData.preferences,
-      free_text_input: formData.free_text_input
+      free_text_input: formData.free_text_input,
+      ...getMemoryIdentity()
     }
 
     // 进度由后端通过 SSE 实时推过来,不再用 setInterval 假装

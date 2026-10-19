@@ -64,6 +64,16 @@ class TripRequest(BaseModel):
     free_text_input: Optional[str] = Field(
         default="", description="额外要求", examples=["希望多安排一些博物馆"]
     )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="服务端会话 ID。提供后会把成功行程保存到 SQLite,供后续修改",
+        max_length=128,
+    )
+    user_id: Optional[str] = Field(
+        default=None,
+        description="稳定用户 ID。多用户部署时应由鉴权层写入,不能直接信任客户端",
+        max_length=128,
+    )
 
     @model_validator(mode="after")
     def _validate_date_range(self) -> "TripRequest":
@@ -261,6 +271,9 @@ class TripPlanResponse(BaseModel):
     )
     message: str = Field(default="", description="消息")
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
+    session_id: Optional[str] = Field(default=None, description="服务端会话 ID")
+    memory_saved: bool = Field(default=False, description="本次成功行程是否写入会话记忆")
+    memory_version: Optional[int] = Field(default=None, description="写入后的会话版本")
 
 
 class POIInfo(BaseModel):
@@ -344,6 +357,16 @@ class ChatRequest(BaseModel):
     trip: Optional[TripRequest] = Field(
         default=None,
         description="已经填好的结构化请求。给了它就跳过意图识别,直接进规划流水线",
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="服务端会话 ID。用于读取上一版行程并支持会话内修改",
+        max_length=128,
+    )
+    user_id: Optional[str] = Field(
+        default=None,
+        description="稳定用户 ID。多用户部署时应来自鉴权层",
+        max_length=128,
     )
 
     model_config = ConfigDict(

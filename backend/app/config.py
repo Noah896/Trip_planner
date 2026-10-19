@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # 所以必须另有一个总闸:超时直接降级,而不是把客户端超时打满。
     plan_total_timeout: int = 240
 
+    # 服务端会话记忆(SQLite)。相对路径以进程工作目录为基准。
+    memory_db_path: str = "data/trip_memory.sqlite3"
+    # 会话记忆保留天数;过期记录会在读写时顺带清理。
+    memory_session_ttl_days: int = 30
+
     # 兼容旧字段(保留以免破坏其他引用)
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"

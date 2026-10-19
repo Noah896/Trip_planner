@@ -125,7 +125,9 @@ export async function generateTripPlanStream(
         success: event.success,
         degraded: event.degraded,
         message: event.message,
-        data: event.data
+        data: event.data,
+        memory_saved: event.memory_saved,
+        memory_version: event.memory_version
       }
     } else if (event.type === 'error') {
       throw new Error(event.message || '生成旅行计划失败')
@@ -156,7 +158,13 @@ export interface ChatStreamHandlers {
  * 够了就直接生成行程。若已经填好表单,可以直接传 trip —— 那样会跳过意图识别。
  */
 export async function chatStream(
-  body: { message: string; history?: ChatTurn[]; trip?: TripFormData },
+  body: {
+    message: string
+    history?: ChatTurn[]
+    trip?: TripFormData
+    session_id?: string
+    user_id?: string
+  },
   handlers: ChatStreamHandlers
 ): Promise<void> {
   const response = await postStream('/api/chat/stream', body)

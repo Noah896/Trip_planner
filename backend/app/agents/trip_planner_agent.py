@@ -156,6 +156,9 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
 12. **用户指定必去的景点必须安排进行程,而且要优先安排** —— 不能当成普通候选
     挑挑拣拣、更不能丢掉。它们的真实信息已经尽量放进上面的候选里了;
     万一没找到,就按用户给的名称写进去。
+13. 如果输入里给了**上一版行程**和**本轮修改要求**,这是一次增量修改:
+    保留上一版中用户没有要求改变的部分,只改用户明确点到的内容;
+    不要把整份行程无理由地重排。
 """
 
 
@@ -171,6 +174,7 @@ class TripPlanningState(TypedDict, total=False):
     attraction_result: str
     weather_result: str
     hotel_result: str
+    previous_plan: Optional[TripPlan]
     plan: Optional[TripPlan]
 
 
@@ -351,6 +355,7 @@ class MultiAgentTripPlanner:
             state.get("attraction_result", ""),
             state.get("weather_result", ""),
             state.get("hotel_result", ""),
+            state.get("previous_plan"),
         )
         plan = await self._run_structured_planner(query, request)
         return {"plan": plan}
@@ -381,7 +386,9 @@ class MultiAgentTripPlanner:
 
     # ---------- 对外接口 ----------
 
-    async def plan_trip(self, request: TripRequest) -> TripPlan:
+    async def plan_trip(
+        self, request: TripRequest, previous_plan: Optional[TripPlan] = None
+    ) -> TripPlan:
         """使用多智能体协作生成旅行计划(兼容旧契约,只返回 TripPlan)
 
         Args:
@@ -391,10 +398,18 @@ class MultiAgentTripPlanner:
             旅行计划。**失败时返回的是占位行程**,调用方若需要区分,
             请改用 :meth:`plan_trip_with_status`。
         """
-        outcome = await self.plan_trip_with_status(request)
+        outcome = (
+            await self.plan_trip_with_status(request)
+            if previous_plan is None
+            else await self.plan_trip_with_status(
+                request, previous_plan=previous_plan
+            )
+        )
         return outcome.plan
 
-    async def plan_trip_with_status(self, request: TripRequest) -> PlanOutcome:
+    async def plan_trip_with_status(
+        self, request: TripRequest, previous_plan: Optional[TripPlan] = None
+    ) -> PlanOutcome:
         """使用多智能体协作生成旅行计划,并返回降级标记
 
         与 ``plan_trip`` 的区别只在于返回值:这里会显式告诉调用方
@@ -424,7 +439,7 @@ class MultiAgentTripPlanner:
             try:
                 final_state = await asyncio.wait_for(
                     graph.ainvoke(
-                        {"request": request},
+                        {"request": request, "previous_plan": previous_plan},
                         config={"recursion_limit": GRAPH_RECURSION_LIMIT},
                     ),
                     timeout=settings.plan_total_timeout,
@@ -457,7 +472,7 @@ class MultiAgentTripPlanner:
             return self._degrade(request, f"规划过程出错: {exc}")
 
     async def plan_trip_stream(
-        self, request: TripRequest
+        self, request: TripRequest, previous_plan: Optional[TripPlan] = None
     ) -> AsyncIterator[Dict[str, Any]]:
         """生成旅行计划,并**边跑边报进度**(供 ``/api/trip/plan/stream`` 的 SSE 使用)。
 
@@ -495,7 +510,7 @@ class MultiAgentTripPlanner:
         try:
             async with asyncio.timeout(settings.plan_total_timeout):
                 async for chunk in graph.astream(
-                    {"request": request},
+                    {"request": request, "previous_plan": previous_plan},
                     config={"recursion_limit": GRAPH_RECURSION_LIMIT},
                     stream_mode="updates",
                 ):
@@ -560,7 +575,12 @@ class MultiAgentTripPlanner:
     # ---------- 查询构建 ----------
 
     def _build_planner_query(
-        self, request: TripRequest, attractions: str, weather: str, hotels: str = ""
+        self,
+        request: TripRequest,
+        attractions: str,
+        weather: str,
+        hotels: str = "",
+        previous_plan: Optional[TripPlan] = None,
     ) -> str:
         """构建行程规划查询"""
         prefs = ", ".join(request.preferences) if request.preferences else "无"
@@ -595,10 +615,31 @@ class MultiAgentTripPlanner:
             listed = "\n".join(f"- {name}" for name in request.must_visit)
             query += f"\n**用户指定必去(必须安排进行程,且优先):**\n{listed}\n"
 
+        if previous_plan is not None:
+            query += self._format_previous_plan(previous_plan)
+
         if request.free_text_input:
-            query += f"\n**额外要求:** {request.free_text_input}"
+            label = "本轮修改要求(优先级最高)" if previous_plan is not None else "额外要求"
+            query += f"\n**{label}:** {request.free_text_input}"
 
         return query
+
+    @staticmethod
+    def _format_previous_plan(plan: TripPlan) -> str:
+        """把上一版行程压缩成规划提示词可读的上下文。"""
+        lines = [
+            "",
+            "**上一版行程(用于理解本轮修改;未要求改变的部分请保留):**",
+            f"- 城市: {plan.city}",
+            f"- 日期: {plan.start_date} 至 {plan.end_date}",
+        ]
+        for day in plan.days:
+            attractions = "、".join(item.name for item in day.attractions) or "无"
+            hotel = day.hotel.name if day.hotel else "无"
+            lines.append(
+                f"- 第{day.day_index + 1}天({day.date}): 景点 {attractions}; 酒店 {hotel}"
+            )
+        return "\n".join(lines) + "\n"
 
     # ---------- 结果解析与兜底 ----------
 

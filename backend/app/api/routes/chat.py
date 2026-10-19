@@ -30,10 +30,11 @@ router = APIRouter(prefix="/chat", tags=["对话式规划"])
         "(同一句话会被拆成很多条,客户端按顺序追加)\n"
         '- `{"type":"progress","stage":...,"status":...}` —— 规划节点进度\n'
         '- `{"type":"artifact","kind":"trip_plan","data":{...}}` —— 结构化行程,前端渲染成卡片\n'
-        '- `{"type":"done","request":{...}}` —— 本轮结束\n'
+        '- `{"type":"done","request":{...},"session_id":...,"memory_saved":...}` —— 本轮结束\n'
         '- `{"type":"error","message":"..."}` —— 出错(流已开始,只能推事件)\n\n'
         "若客户端已经填好表单,可直接传 `trip` 字段 —— 此时跳过意图识别,"
-        "不额外消耗模型调用。"
+        "不额外消耗模型调用。传稳定的 `session_id` / `user_id` 后,"
+        "成功行程会写入 SQLite,下一轮可以只说「把第二天换成博物馆」。"
     ),
 )
 async def chat_stream(payload: ChatRequest) -> StreamingResponse:

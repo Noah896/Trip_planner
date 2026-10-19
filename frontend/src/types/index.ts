@@ -77,6 +77,8 @@ export interface TripPlan {
 }
 
 export interface TripFormData {
+  session_id?: string
+  user_id?: string
   city: string
   start_date: string
   end_date: string
@@ -93,6 +95,9 @@ export interface TripPlanResponse {
   degraded?: boolean
   message: string
   data?: TripPlan
+  session_id?: string
+  memory_saved?: boolean
+  memory_version?: number
 }
 
 
@@ -117,6 +122,8 @@ export interface TripStreamResult {
   message: string
   elapsed: number
   data: TripPlan
+  memory_saved?: boolean
+  memory_version?: number
 }
 
 /** 流中途出错(此时 HTTP 状态码已经是 200,只能靠事件报错) */
@@ -151,6 +158,9 @@ export interface ChatArtifactEvent {
 export interface ChatDoneEvent {
   type: 'done'
   request?: TripFormData
+  session_id?: string
+  memory_saved?: boolean
+  memory_version?: number
 }
 
 export interface ChatErrorEvent {

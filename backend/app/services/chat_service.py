@@ -27,8 +27,13 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..agents.trip_planner_agent import get_trip_planner_agent
 from ..config import get_settings
-from ..models.schemas import ChatMessage, ChatRequest, TripRequest
+from ..models.schemas import ChatMessage, ChatRequest, TripPlan, TripRequest
 from .llm_service import get_llm
+from .memory_store import (
+    MemoryAccessError,
+    SessionMemory,
+    get_memory_store,
+)
 
 # 模型没提到这些字段时用的兜底值(与表单页的默认值保持一致)
 DEFAULT_TRANSPORTATION = "公共交通"
@@ -48,7 +53,10 @@ class ChatDecision(BaseModel):
     """
 
     intent: str = Field(
-        description="plan(信息够了,直接规划)/ clarify(缺关键信息,要追问)/ chat(闲聊或问一次性问题)"
+        description=(
+            "plan(新行程,信息够了)/ refine(基于上一版行程修改)/ "
+            "clarify(缺关键信息)/ chat(闲聊或一次性问题)"
+        )
     )
     reply: str = Field(default="", description="给用户看的一句自然中文")
     city: Optional[str] = Field(default=None, description="目的地城市")
@@ -88,7 +96,7 @@ class ChatDecision(BaseModel):
         """容忍大小写、空格和多余修饰(``"Plan"`` / ``"plan意图"``)。"""
         if isinstance(value, str):
             text = value.strip().lower()
-            for name in ("plan", "clarify", "chat"):
+            for name in ("refine", "plan", "clarify", "chat"):
                 if name in text:
                     return name
         return value
@@ -125,8 +133,9 @@ class ChatDecision(BaseModel):
 CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。用户会用自然语言提需求,
 你的任务是判断该做什么、把规划需要的信息抽出来,并给用户一句自然的回应。
 
-**intent 只能取三个值:**
+**intent 只能取四个值:**
 - `plan`:信息够了,可以直接生成行程(至少要有城市 + 一段明确时间)
+- `refine`:上下文里有「上一版行程」,用户是在修改它(如"第二天换成博物馆")
 - `clarify`:缺关键信息,需要追问(最常见的是没说什么时候去、去几天)
 - `chat`:用户在闲聊、或问一次性问题(如"你能做什么""介绍一下你自己")
 
@@ -185,8 +194,20 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
    漏了的话下游检索不到它,规划就会把用户选的景点当成普通候选、甚至排掉。
    注意区分:`must_visit` 是"一定要去的具体地点",`preferences` 只是"偏好类型"。
 
+**会话内修改(只在出现了「上一版行程」时使用):**
+
+用户说"第二天换成博物馆""酒店换近一点""再加一个晚上"这类话时:
+1. `intent` 填 `refine`,不要重新追问城市、日期、天数 —— 上下文里已经有。
+2. **只抽取本轮明确改变的内容**,不要把上一版行程里的旧槽位当成用户这一轮重新说的话。
+3. 把具体修改写进 `free_text_input`,尽量保留用户的原始措辞。
+4. 如果用户明确改了城市、日期或天数,照常填对应槽位;没改的槽位留空。
+5. `reply` 简短复述这次要改什么,例如"好的,把第二天换成博物馆,其他安排保持不变"。
+
+**没有「上一版行程」时绝对不能返回 `refine`**。
+
 **reply 字段**(用一句自然、简短的中文):
 - intent=plan:复述你理解到的需求,例如"好的,北京 3 天,10-16 出发,我这就开始规划";
+- intent=refine:复述这次要改什么,并说明其余部分保持;
 - intent=clarify:把缺的信息一次问清,别挤牙膏;
 - intent=chat:直接回应。
 
@@ -305,12 +326,42 @@ def _fallback_decision() -> ChatDecision:
     return ChatDecision(intent="clarify", reply=_FALLBACK_REPLY, missing=["目的地", "出发日期"])
 
 
-def _format_context(message: str, history: Sequence[ChatMessage], today: date) -> str:
-    """把"今天 + 对话历史 + 最新一句"拼成一次调用的输入。
+def _format_session_context(session: SessionMemory) -> str:
+    """把上一版请求和行程压缩成意图识别可读的上下文。"""
+    request = TripRequest.model_validate(session.request)
+    plan = TripPlan.model_validate(session.plan)
+    lines = [
+        "【上一版行程】",
+        f"- 城市:{plan.city}",
+        f"- 日期:{plan.start_date} 至 {plan.end_date}",
+        f"- 交通:{request.transportation};住宿:{request.accommodation}",
+        f"- 偏好:{', '.join(request.preferences) if request.preferences else '无'}",
+    ]
+    for day in plan.days:
+        attractions = "、".join(item.name for item in day.attractions) or "无"
+        hotel = day.hotel.name if day.hotel else "无"
+        lines.append(
+            f"- 第{day.day_index + 1}天({day.date}):景点 {attractions};酒店 {hotel}"
+        )
+    return "\n".join(lines)
+
+
+def _format_context(
+    message: str,
+    history: Sequence[ChatMessage],
+    today: date,
+    *,
+    session: Optional[SessionMemory] = None,
+) -> str:
+    """把"今天 + 上一版行程 + 对话历史 + 最新一句"拼成一次调用的输入。
 
     "今天"放在这里而不是系统提示词里,这样 Agent 可以复用(提示词不用每天重建)。
     """
     lines: List[str] = [f"【今天是 {today.isoformat()}】", ""]
+
+    if session is not None:
+        lines.append(_format_session_context(session))
+        lines.append("")
 
     recent = list(history)[-MAX_HISTORY:]
     if recent:
@@ -338,7 +389,12 @@ def _parse_date(value: Optional[str]) -> Optional[date]:
     return None
 
 
-def build_trip_request(decision: ChatDecision) -> Optional[TripRequest]:
+def build_trip_request(
+    decision: ChatDecision,
+    *,
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Optional[TripRequest]:
     """把抽到的槽位拼成 ``TripRequest``;关键信息不全时返回 ``None``(交给追问)。
 
     这里**只做拼装和校验,不做猜测**:模型没给的日期不会替它编一个,
@@ -385,10 +441,93 @@ def build_trip_request(decision: ChatDecision) -> Optional[TripRequest]:
             preferences=[str(p).strip() for p in (decision.preferences or []) if str(p).strip()],
             must_visit=[str(p).strip() for p in (decision.must_visit or []) if str(p).strip()],
             free_text_input=(decision.free_text_input or "").strip(),
+            session_id=(session_id or "").strip() or None,
+            user_id=(user_id or "").strip() or None,
         )
     except Exception as exc:  # noqa: BLE001 - 拼不出来就退回追问,别让请求 500
         print(f"⚠️  槽位拼不成 TripRequest: {type(exc).__name__}: {exc}")
         return None
+
+
+def _dedupe(values: Sequence[str]) -> List[str]:
+    """去空、去重,同时保留原顺序。"""
+    result: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value).strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def merge_refinement(
+    previous: TripRequest,
+    decision: ChatDecision,
+    message: str,
+    *,
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> Optional[TripRequest]:
+    """把本轮修改确定性合并到上一版请求上。
+
+    模型只负责说"这轮改什么",已有城市/日期由代码保留,避免模型漏抄一个槽位就把
+    整段上下文丢掉。上一版稳定请求单独存在会话表里,因此多轮修改不会让
+    ``free_text_input`` 无限累积旧指令。
+    """
+    city = (decision.city or previous.city or "").strip()
+    if not city:
+        return None
+
+    start = _parse_date(decision.start_date) or previous.start_date
+    end_input = _parse_date(decision.end_date)
+    days_input = decision.travel_days
+
+    if end_input is not None:
+        end = end_input
+    elif days_input is not None:
+        end = start + timedelta(days=int(days_input) - 1)
+    elif _parse_date(decision.start_date) is not None:
+        end = start + timedelta(days=previous.travel_days - 1)
+    else:
+        end = previous.end_date
+
+    if end < start:
+        return None
+
+    edit = (decision.free_text_input or message or "").strip()
+    preferences = _dedupe([*previous.preferences, *decision.preferences])
+    must_visit = _dedupe([*previous.must_visit, *decision.must_visit])
+
+    try:
+        return TripRequest(
+            city=city,
+            start_date=start,
+            end_date=end,
+            travel_days=(end - start).days + 1,
+            transportation=(decision.transportation or previous.transportation).strip(),
+            accommodation=(decision.accommodation or previous.accommodation).strip(),
+            preferences=preferences,
+            must_visit=must_visit,
+            free_text_input=edit,
+            session_id=(session_id or "").strip() or None,
+            user_id=(user_id or "").strip() or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️  修改要求合并不出 TripRequest: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _with_identity(
+    trip: TripRequest, *, session_id: Optional[str], user_id: Optional[str]
+) -> TripRequest:
+    """把 ChatRequest 上的会话身份补到结构化 trip 上。"""
+    return trip.model_copy(
+        update={
+            "session_id": (session_id or trip.session_id or "").strip() or None,
+            "user_id": (user_id or trip.user_id or "").strip() or None,
+        }
+    )
 
 
 async def decide_streaming(
@@ -397,6 +536,7 @@ async def decide_streaming(
     *,
     today: Optional[date] = None,
     model: Any = None,
+    session: Optional[SessionMemory] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """判断意图、抽取槽位(**一次**模型调用),同时把回复逐字流出去。
 
@@ -411,7 +551,12 @@ async def decide_streaming(
     router = model or _get_router_model()
     payload = [
         {"role": "system", "content": build_system_prompt()},
-        {"role": "user", "content": _format_context(message, history, today or date.today())},
+        {
+            "role": "user",
+            "content": _format_context(
+                message, history, today or date.today(), session=session
+            ),
+        },
     ]
 
     raw_args = ""
@@ -467,11 +612,15 @@ async def decide_streaming(
 
 
 async def decide(
-    message: str, history: Sequence[ChatMessage], *, today: Optional[date] = None
+    message: str,
+    history: Sequence[ChatMessage],
+    *,
+    today: Optional[date] = None,
+    session: Optional[SessionMemory] = None,
 ) -> ChatDecision:
     """只要判断结果、不要流式时的便捷封装(测试和内部调用用)。"""
     decision = _fallback_decision()
-    async for item in decide_streaming(message, history, today=today):
+    async for item in decide_streaming(message, history, today=today, session=session):
         if "decision" in item:
             decision = item["decision"]
     return decision
@@ -488,7 +637,25 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
       前端把它渲染成卡片(天气 / 景点 / 酒店 / 预算都在里面)
     - ``{"type": "done", "request": {...}}``:本轮结束
     """
-    trip = request.trip
+    session_id = (
+        request.session_id or (request.trip.session_id if request.trip else None) or ""
+    ).strip()
+    user_id = (
+        request.user_id or (request.trip.user_id if request.trip else None) or ""
+    ).strip()
+
+    previous_memory: Optional[SessionMemory] = None
+    if session_id:
+        try:
+            previous_memory = get_memory_store().get_session(
+                session_id, user_id=user_id or None
+            )
+        except MemoryAccessError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    trip = _with_identity(request.trip, session_id=session_id, user_id=user_id) if request.trip else None
+    previous_plan: Optional[TripPlan] = None
+    is_refine = False
 
     if trip is None:
         decision: Optional[ChatDecision] = None
@@ -496,7 +663,9 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
         # 助手这次要说的话是**边生成边流出去的** —— 每个 message 事件是一段增量,
         # 前端负责追加。虽然流式不好再"撤回",但用户能看到字在往外冒,
         # 而不是盯着空气泡等十几秒。
-        async for item in decide_streaming(request.message, request.history):
+        async for item in decide_streaming(
+            request.message, request.history, session=previous_memory
+        ):
             if "delta" in item:
                 yield {"type": "message", "text": item["delta"]}
             else:
@@ -506,11 +675,40 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
             decision = _fallback_decision()
             yield {"type": "message", "text": decision.reply}
 
-        if decision.intent != "plan":
+        if decision.intent == "refine":
+            if previous_memory is None:
+                yield {
+                    "type": "message",
+                    "text": "\n\n我没有找到可修改的上一版行程。请告诉我城市、出发时间和天数,我重新规划。",
+                }
+                yield {"type": "done", "session_id": session_id or None}
+                return
+
+            previous_request = TripRequest.model_validate(previous_memory.request)
+            trip = merge_refinement(
+                previous_request,
+                decision,
+                request.message,
+                session_id=session_id,
+                user_id=user_id,
+            )
+            if trip is None:
+                yield {
+                    "type": "message",
+                    "text": "\n\n这次修改我没有理解清楚,请再说得具体一点,例如「把第二天换成博物馆」。",
+                }
+                yield {"type": "done", "session_id": session_id or None}
+                return
+            previous_plan = TripPlan.model_validate(previous_memory.plan)
+            is_refine = True
+        elif decision.intent != "plan":
             yield {"type": "done"}
             return
 
-        trip = build_trip_request(decision)
+        if not is_refine:
+            trip = build_trip_request(
+                decision, session_id=session_id or None, user_id=user_id or None
+            )
         if trip is None:
             # 模型判定"可以规划"但槽位拼不出来。这时候那句话**已经流出去了**
             # (多半是"好的,我这就开始"),所以只能顺着往下补一句,把话收回圆。
@@ -521,11 +719,42 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
 
     # ---- 到这里就复用现有流水线:检索(确定性)+ 规划(唯一那次模型调用) ----
     planner = get_trip_planner_agent()
-    async for event in planner.plan_trip_stream(trip):
+    stream = (
+        planner.plan_trip_stream(trip, previous_plan=previous_plan)
+        if previous_plan is not None
+        else planner.plan_trip_stream(trip)
+    )
+    memory_saved = False
+    memory_version: Optional[int] = None
+
+    async for event in stream:
         event_type = event.get("type")
         if event_type == "progress":
             yield event
         elif event_type == "result":
+            if (
+                session_id
+                and not event.get("degraded", False)
+                and event.get("data")
+            ):
+                try:
+                    plan = TripPlan.model_validate(event["data"])
+                    saved = get_memory_store().save_successful_plan(
+                        session_id=session_id,
+                        user_id=user_id or None,
+                        request=trip,
+                        plan=plan,
+                        last_message=request.message,
+                        reset_base=not is_refine,
+                    )
+                    memory_saved = True
+                    memory_version = saved.version
+                except MemoryAccessError as exc:
+                    raise RuntimeError(str(exc)) from exc
+                except Exception as exc:  # noqa: BLE001
+                    # 记忆写入失败不能吞掉已经生成好的行程,但要明确告诉客户端没保存。
+                    print(f"⚠️  会话记忆写入失败: {type(exc).__name__}: {exc}")
+
             yield {
                 "type": "artifact",
                 "kind": "trip_plan",
@@ -535,8 +764,15 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
                 "elapsed": event.get("elapsed"),
                 "request": trip.model_dump(mode="json"),
                 "data": event.get("data"),
+                "memory_saved": memory_saved,
             }
         else:
             yield event
 
-    yield {"type": "done", "request": trip.model_dump(mode="json")}
+    yield {
+        "type": "done",
+        "request": trip.model_dump(mode="json"),
+        "session_id": session_id or None,
+        "memory_saved": memory_saved,
+        "memory_version": memory_version,
+    }
