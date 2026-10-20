@@ -21,10 +21,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
-from ..models.schemas import POIInfo, TripRequest, WeatherInfo
+from ..models.schemas import Location, POIInfo, TripRequest, WeatherInfo
 from .amap_service import AmapService, get_amap_service
+from .itinerary_quality import (
+    annotate_attraction_candidates,
+    compact_request_reason,
+    is_compact_request,
+    rank_attraction_candidates,
+    retain_compact_candidates,
+)
 
 # 需要回填详情(detail)的条数上限。
 # detail 调用在高德 MCP 上是串行的(~0.9s/次),这个数字直接决定检索耗时:
@@ -90,6 +97,28 @@ async def _collect_pois(
             collected.append(poi)
 
     return collected
+
+
+async def _resolve_city_center(
+    service: AmapService,
+    city: str,
+) -> Optional[Location]:
+    """解析城市中心。
+
+    多一次地理编码换来可解释的距离排序。解析失败只记录日志,不影响检索主流程。
+    """
+    geocoder = getattr(service, "geocode", None)
+    if geocoder is None:
+        return None
+
+    try:
+        try:
+            return await geocoder(city, city=city)
+        except TypeError:
+            return await geocoder(city)
+    except Exception as exc:  # noqa: BLE001 - 距离增强信息不该阻断检索
+        print(f"⚠️  城市中心解析失败: {type(exc).__name__}: {exc}")
+        return None
 
 
 async def _enrich(
@@ -169,6 +198,12 @@ def _attraction_rank(poi: POIInfo) -> int:
 def _render_attractions(items: Sequence[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for index, item in enumerate(items, 1):
+        distance = item.get("center_distance_km")
+        distance_text = (
+            f"距城市中心 {float(distance):.1f} 公里"
+            if isinstance(distance, (int, float))
+            else ""
+        )
         lines.append(
             f"{index}. "
             + _join(
@@ -180,6 +215,7 @@ def _render_attractions(items: Sequence[Dict[str, Any]]) -> str:
                     f"评分 {item['rating']}" if item["rating"] else "",
                     f"门票 {item['cost']}" if item["cost"] else "",
                     f"开放时间 {item['opentime']}" if item["opentime"] else "",
+                    distance_text,
                 ]
             )
         )
@@ -231,6 +267,7 @@ async def retrieve_attractions(request: TripRequest) -> str:
     service = get_amap_service()
     keywords = [k for k in request.preferences if k][:2] or ["景点"]
     limit = _detail_budget(request.travel_days, ATTRACTION_MIN, ATTRACTION_MAX)
+    compact = is_compact_request(request)
 
     try:
         # 1) 用户点名的景点**优先**:先按名字把它们解析出来,占住候选池最前面。
@@ -244,14 +281,45 @@ async def retrieve_attractions(request: TripRequest) -> str:
         rest = [poi for poi in rest if poi.id not in pinned_ids]
         rest.sort(key=_attraction_rank)
 
-        pois = pinned + rest
-        items = await _enrich(service, pois[:limit])
+        remaining = max(0, limit - len(pinned))
+        pois = pinned + rest[:remaining]
+        enriched = await _enrich(service, pois)
+
+        # 3) 详情回填后再按"景点相关性 + 城市中心距离"排序。
+        #    用户点名必去项固定在原位置,不会因为位于远郊而被重排或淘汰。
+        center = await _resolve_city_center(service, request.city)
+        pinned_count = min(len(pinned), len(enriched))
+        pinned_items = annotate_attraction_candidates(
+            enriched[:pinned_count], center
+        )
+        ranked_rest = rank_attraction_candidates(
+            enriched[pinned_count:],
+            center,
+            compact=compact,
+        )
+        if compact:
+            minimum_total = min(limit, max(3, request.travel_days))
+            minimum_rest = max(0, minimum_total - pinned_count)
+            original_rest_count = len(ranked_rest)
+            ranked_rest = retain_compact_candidates(
+                ranked_rest,
+                min_candidates=minimum_rest,
+            )
+            if len(ranked_rest) < original_rest_count:
+                print(
+                    "✂️  紧凑路线已过滤远端候选: "
+                    f"{original_rest_count} → {len(ranked_rest)}"
+                )
+        items = pinned_items + ranked_rest
     except Exception as exc:  # noqa: BLE001 - 检索失败不该让整条链路 500
         print(f"⚠️  景点检索失败: {type(exc).__name__}: {exc}")
         return ""
 
     if pinned:
         print(f"📌 用户指定必去 {len(pinned)} 个,已置顶")
+    if compact:
+        reason = compact_request_reason(request) or "紧凑行程"
+        print(f"🧭 已启用紧凑路线排序: {reason}")
     print(f"🔍 景点检索完成:关键词={keywords},回填 {len(items)} 个候选")
     return _render_attractions(items)
 

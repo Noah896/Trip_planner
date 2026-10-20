@@ -31,7 +31,7 @@ def _sample_responses():
 def test_golden_cases_are_valid_and_cover_required_scenarios():
     cases = _cases()
 
-    assert len(cases) == 18
+    assert len(cases) == 19
     assert len({case["id"] for case in cases}) == len(cases)
     assert {"classic", "family", "food", "must_visit", "nature"} <= {
         case["category"] for case in cases
@@ -75,6 +75,84 @@ def test_missing_must_visit_and_date_mismatch_are_detected():
 
     assert "must_visit" in result["failed_checks"]
     assert "day_sequence" in result["failed_checks"]
+
+
+def test_terracotta_museum_name_is_accepted_as_bingmayong_alias():
+    cases = {case["id"]: case for case in _cases()}
+    response = copy.deepcopy(_sample_responses()["beijing-must-visit"])
+    response["data"]["city"] = "西安"
+    response["data"]["start_date"] = "2026-11-27"
+    response["data"]["end_date"] = "2026-11-29"
+    response["data"]["days"][0]["date"] = "2026-11-27"
+    response["data"]["days"][1]["date"] = "2026-11-28"
+    response["data"]["days"][2]["date"] = "2026-11-29"
+    response["data"]["days"][0]["attractions"][0]["name"] = "秦始皇帝陵博物院"
+
+    result = evaluate_case(cases["xian-terracotta-3d"], response)
+
+    assert result["passed"] is True
+    assert "must_visit" not in result["failed_checks"]
+
+
+def _beijing_family_response():
+    response = copy.deepcopy(_sample_responses()["beijing-classic-3d"])
+    response["data"]["start_date"] = "2026-11-21"
+    response["data"]["end_date"] = "2026-11-23"
+    response["data"]["days"][0]["date"] = "2026-11-21"
+    response["data"]["days"][1]["date"] = "2026-11-22"
+    response["data"]["days"][2]["date"] = "2026-11-23"
+    return response
+
+
+def test_family_route_quality_passes_for_compact_plan():
+    cases = {case["id"]: case for case in _cases()}
+
+    result = evaluate_case(
+        cases["beijing-family-3d"],
+        _beijing_family_response(),
+    )
+
+    assert result["passed"] is True
+    assert "attraction_distance" not in result["failed_checks"]
+    assert "daily_route" not in result["failed_checks"]
+
+
+def test_family_route_quality_rejects_remote_attraction():
+    cases = {case["id"]: case for case in _cases()}
+    response = _beijing_family_response()
+    response["data"]["days"][0]["attractions"][0].update(
+        {
+            "name": "金海湖",
+            "address": "平谷区金海湖镇",
+            "location": {"longitude": 117.24, "latitude": 40.17},
+        }
+    )
+
+    result = evaluate_case(cases["beijing-family-3d"], response)
+
+    assert result["passed"] is False
+    assert "attraction_distance" in result["failed_checks"]
+
+
+def test_remote_must_visit_is_exempt_from_route_quality():
+    case = copy.deepcopy(
+        {item["id"]: item for item in _cases()}["beijing-family-3d"]
+    )
+    case["request"]["must_visit"] = ["金海湖"]
+    case["expect"]["must_visit"] = ["金海湖"]
+    response = _beijing_family_response()
+    response["data"]["days"][0]["attractions"][0].update(
+        {
+            "name": "金海湖",
+            "address": "平谷区金海湖镇",
+            "location": {"longitude": 117.24, "latitude": 40.17},
+        }
+    )
+
+    result = evaluate_case(case, response)
+
+    assert result["passed"] is True
+    assert "attraction_distance" not in result["failed_checks"]
 
 
 def test_report_and_markdown_include_failure_details():

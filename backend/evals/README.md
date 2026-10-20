@@ -6,6 +6,8 @@
 - `TripPlan` schema、城市、日期和天数是否一致；
 - 每日是否有景点、唯一景点数量是否足够；
 - 用户点名地点是否进入行程；
+- 亲子、休闲、少走路场景下的城市中心距离限制；
+- 同一天景点之间的路线跨度；
 - 坐标、预算、占位内容和总体建议是否有效；
 - 端到端耗时是否超过 case 上限。
 
@@ -25,7 +27,8 @@ $env:TRIP_AUTH_PASSWORD='eval-password'
 ```
 
 `live` 模式使用后端现有 `/api/trip/plan/stream`，每个 case 会消耗一次规划模型调用。
-请使用专用评测账号，避免长期偏好污染评测；脚本不会传 `session_id`，因此不会写入
-新的历史行程。
+脚本仍建议使用专用评测账号，并会在每个 case 前清空该账号的长期偏好，避免上一组
+“亲子 / 少走路”等偏好污染下一组。需要保留账号记忆做人工观察时，可显式传入
+`--keep-evaluation-memory`。脚本不会传 `session_id`，因此不会写入新的历史行程。
 
 报告默认写入 `evals/results/latest.json` 和 `evals/results/latest.md`。

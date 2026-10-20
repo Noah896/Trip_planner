@@ -4,6 +4,8 @@
 这里直接构造高德真实返回结构来验证,避免"改解析逻辑没有任何测试兜底"。
 """
 
+import asyncio
+
 from app.services.amap_service import AmapService
 
 
@@ -62,6 +64,42 @@ class TestParsePois:
         assert AmapService._parse_pois(None) == []
         assert AmapService._parse_pois("字符串") == []
         assert AmapService._parse_pois({}) == []
+
+
+class TestGeocode:
+    def test_parses_project_mcp_return_shape(self, monkeypatch):
+        service = AmapService()
+
+        async def fake_call(tool_name, arguments):
+            assert tool_name == "maps_geo"
+            return {
+                "return": [
+                    {
+                        "province": "北京市",
+                        "city": "北京市",
+                        "location": "116.397463,39.909187",
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(service, "_call", fake_call)
+        location = asyncio.run(service.geocode("北京", city="北京"))
+
+        assert location is not None
+        assert location.longitude == 116.397463
+        assert location.latitude == 39.909187
+
+    def test_parses_open_platform_geocodes_shape(self, monkeypatch):
+        service = AmapService()
+
+        async def fake_call(tool_name, arguments):
+            return {"geocodes": [{"location": "121.473701,31.230416"}]}
+
+        monkeypatch.setattr(service, "_call", fake_call)
+        location = asyncio.run(service.geocode("上海"))
+
+        assert location is not None
+        assert location.longitude == 121.473701
 
 
 class TestParseWeather:

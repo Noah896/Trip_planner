@@ -308,10 +308,22 @@ class AmapService:
         print(f"📍 地理编码: {address}")
         data = await self._call(TOOL_GEO, arguments)
 
-        if isinstance(data, dict):
-            geocodes = data.get("geocodes") or []
-            if geocodes and isinstance(geocodes[0], dict):
-                return self._parse_location(geocodes[0].get("location"))
+        if isinstance(data, list):
+            geocodes = data
+        elif isinstance(data, dict):
+            # 本项目实际 MCP 使用 ``return``;高德开放平台原始格式用
+            # ``geocodes``,两种都兼容。
+            geocodes = (
+                data.get("geocodes")
+                or data.get("return")
+                or data.get("data")
+                or []
+            )
+        else:
+            geocodes = []
+
+        if geocodes and isinstance(geocodes[0], dict):
+            return self._parse_location(geocodes[0].get("location"))
         return None
 
     async def get_poi_detail(self, poi_id: str) -> Dict[str, Any]:

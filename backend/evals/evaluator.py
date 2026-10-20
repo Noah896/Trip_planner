@@ -12,10 +12,14 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.models.schemas import TripPlan, TripRequest
+from app.services.itinerary_quality import daily_route_span_km, haversine_km
 
 
 DEFAULT_CASES_PATH = Path(__file__).with_name("golden_cases.json")
 DEFAULT_MAX_LATENCY_SECONDS = 180.0
+MUST_VISIT_ALIAS_GROUPS = (
+    ("兵马俑", "秦始皇帝陵博物院", "秦始皇兵马俑博物馆"),
+)
 
 
 def load_golden_cases(path: str | Path = DEFAULT_CASES_PATH) -> List[Dict[str, Any]]:
@@ -72,6 +76,37 @@ def _contains_name(actual: str, expected: str) -> bool:
 
 def _collect_attractions(plan: TripPlan):
     return [attraction for day in plan.days for attraction in day.attractions]
+
+
+def _must_visit_names(
+    request: TripRequest,
+    expect: Dict[str, Any],
+) -> List[str]:
+    names: List[str] = []
+    for value in [
+        *request.must_visit,
+        *(expect.get("must_visit") or []),
+    ]:
+        normalized = str(value).strip()
+        if normalized and normalized not in names:
+            names.append(normalized)
+    return names
+
+
+def _matches_must_visit(name: str, must_visit: List[str]) -> bool:
+    actual = _normalize_text(name)
+    for expected in must_visit:
+        if _contains_name(name, expected):
+            return True
+        wanted = _normalize_text(expected)
+        for group in MUST_VISIT_ALIAS_GROUPS:
+            aliases = [_normalize_text(alias) for alias in group]
+            if (
+                any(alias in wanted for alias in aliases)
+                and any(alias in actual for alias in aliases)
+            ):
+                return True
+    return False
 
 
 def evaluate_case(
@@ -178,19 +213,15 @@ def evaluate_case(
             )
         )
 
-        must_visit = []
-        for value in [
-            *request.must_visit,
-            *(expect.get("must_visit") or []),
-        ]:
-            normalized = str(value).strip()
-            if normalized and normalized not in must_visit:
-                must_visit.append(normalized)
+        must_visit = _must_visit_names(request, expect)
         if must_visit:
             missing = [
                 expected
                 for expected in must_visit
-                if not any(_contains_name(name, expected) for name in names)
+                if not any(
+                    _matches_must_visit(name, [expected])
+                    for name in names
+                )
             ]
             checks.append(
                 _check(
@@ -218,6 +249,82 @@ def evaluate_case(
                 weight=6,
             )
         )
+
+        route_quality = expect.get("route_quality")
+        if isinstance(route_quality, dict):
+            center = route_quality.get("center")
+            max_distance = route_quality.get("max_center_distance_km")
+            if center and isinstance(max_distance, (int, float)):
+                max_remote_per_day = max(
+                    0,
+                    int(route_quality.get("max_remote_attractions_per_day", 0)),
+                )
+                remote_by_day: List[List[str]] = []
+                remote_details: List[str] = []
+                for day in plan.days:
+                    remote = []
+                    for attraction in day.attractions:
+                        if _matches_must_visit(attraction.name, must_visit):
+                            continue
+                        distance = haversine_km(
+                            center,
+                            attraction.location,
+                        )
+                        if distance is not None and distance > float(max_distance):
+                            remote.append(attraction.name)
+                            remote_details.append(
+                                f"第{day.day_index + 1}天 {attraction.name}"
+                                f"({distance:.1f}km)"
+                            )
+                    remote_by_day.append(remote)
+
+                worst_remote = max(
+                    (len(items) for items in remote_by_day),
+                    default=0,
+                )
+                checks.append(
+                    _check(
+                        "attraction_distance",
+                        worst_remote <= max_remote_per_day,
+                        (
+                            f"超过 {float(max_distance):g}km 的非必去景点: "
+                            f"{remote_details or '无'}; 单日上限={max_remote_per_day}"
+                        ),
+                        weight=10,
+                    )
+                )
+
+            max_daily_route = route_quality.get("max_daily_route_km")
+            if isinstance(max_daily_route, (int, float)):
+                over_limit: List[str] = []
+                measured: List[str] = []
+                for day in plan.days:
+                    has_must_visit = any(
+                        _matches_must_visit(attraction.name, must_visit)
+                        for attraction in day.attractions
+                    )
+                    if has_must_visit:
+                        measured.append(f"第{day.day_index + 1}天=豁免必去")
+                        continue
+                    span = daily_route_span_km(day.attractions)
+                    if span is None:
+                        continue
+                    measured.append(f"第{day.day_index + 1}天={span:.1f}km")
+                    if span > float(max_daily_route):
+                        over_limit.append(
+                            f"第{day.day_index + 1}天={span:.1f}km"
+                        )
+                checks.append(
+                    _check(
+                        "daily_route",
+                        not over_limit,
+                        (
+                            f"每日路线跨度: {', '.join(measured) or '无'}; "
+                            f"单日上限={float(max_daily_route):g}km"
+                        ),
+                        weight=10,
+                    )
+                )
 
         placeholder = (
             "占位" in plan.overall_suggestions

@@ -62,7 +62,46 @@
         "min_attractions_per_day": 1,
         "min_unique_attractions": 3,
         "max_latency_seconds": 180,
-        "require_budget": true
+        "require_budget": true,
+        "route_quality": {
+          "center": {
+            "longitude": 121.4737,
+            "latitude": 31.2304
+          },
+          "max_center_distance_km": 35,
+          "max_remote_attractions_per_day": 0,
+          "max_daily_route_km": 70
+        }
+      }
+    },
+    {
+      "id": "beijing-family-3d",
+      "category": "family",
+      "request": {
+        "city": "北京",
+        "start_date": "2026-11-21",
+        "end_date": "2026-11-23",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "舒适型酒店",
+        "preferences": ["亲子", "休闲"],
+        "must_visit": [],
+        "free_text_input": "带六岁小孩,少走路,不想每天来回折腾"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true,
+        "route_quality": {
+          "center": {
+            "longitude": 116.4074,
+            "latitude": 39.9042
+          },
+          "max_center_distance_km": 35,
+          "max_remote_attractions_per_day": 0,
+          "max_daily_route_km": 70
+        }
       }
     },
     {
@@ -189,7 +228,16 @@
         "min_attractions_per_day": 1,
         "min_unique_attractions": 3,
         "max_latency_seconds": 180,
-        "require_budget": true
+        "require_budget": true,
+        "route_quality": {
+          "center": {
+            "longitude": 114.0579,
+            "latitude": 22.5431
+          },
+          "max_center_distance_km": 35,
+          "max_remote_attractions_per_day": 0,
+          "max_daily_route_km": 70
+        }
       }
     },
     {
@@ -210,7 +258,16 @@
         "min_attractions_per_day": 1,
         "min_unique_attractions": 2,
         "max_latency_seconds": 180,
-        "require_budget": true
+        "require_budget": true,
+        "route_quality": {
+          "center": {
+            "longitude": 118.0894,
+            "latitude": 24.4798
+          },
+          "max_center_distance_km": 25,
+          "max_remote_attractions_per_day": 0,
+          "max_daily_route_km": 45
+        }
       }
     },
     {

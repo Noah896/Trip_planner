@@ -35,6 +35,10 @@ from ..models.schemas import (
     TripRequest,
 )
 from ..services.amap_mcp import get_amap_tools, root_cause
+from ..services.itinerary_quality import (
+    compact_request_reason,
+    is_compact_request,
+)
 from ..services.llm_service import get_llm
 from ..services.trip_retrieval import (
     retrieve_attractions,
@@ -159,6 +163,8 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
 13. 如果输入里给了**上一版行程**和**本轮修改要求**,这是一次增量修改:
     保留上一版中用户没有要求改变的部分,只改用户明确点到的内容;
     不要把整份行程无理由地重排。
+14. 景点候选前的序号已经考虑类别与城市中心距离。优先选择同一天的景点彼此靠近、
+    交通顺路的组合;不要把一天排成跨城往返。
 """
 
 
@@ -608,9 +614,18 @@ class MultiAgentTripPlanner:
 1. 每天安排2-3个景点
 2. 每天必须包含早中晚三餐
 3. 每天推荐一个具体的酒店(从酒店信息中选择)
-4. 考虑景点之间的距离和交通方式
+4. 同一天的景点要尽量同区、少折返;候选的"距城市中心"可用于判断远近
 5. 返回完整的JSON格式数据
 6. 景点的经纬度坐标要真实准确
+"""
+        if is_compact_request(request):
+            reason = compact_request_reason(request) or "紧凑 / 低体力"
+            query += f"""
+
+**路线舒适度约束({reason}):**
+- 除用户明确点名的必去景点外,优先安排距城市中心较近、彼此交通顺路的候选。
+- 不要为了凑数量选择远郊景点;每天最多安排一个明显远离市区的景点。
+- 带小孩、老人、少走路或休闲请求下,避免高步行强度、频繁跨区和来回折返。
 """
         if request.must_visit:
             listed = "\n".join(f"- {name}" for name in request.must_visit)

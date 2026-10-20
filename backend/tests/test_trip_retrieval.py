@@ -12,7 +12,7 @@
 
 import asyncio
 
-from app.models.schemas import POIInfo, TripRequest, WeatherInfo
+from app.models.schemas import Location, POIInfo, TripRequest, WeatherInfo
 from app.services import trip_retrieval
 
 
@@ -138,6 +138,106 @@ class TestRetrieveAttractions:
         )
 
         assert text.index("天坛公园") < text.index("全聚德")
+
+    def test_compact_route_ranks_near_candidates_before_far_scenic_spot(
+        self, monkeypatch
+    ):
+        class _Centered(_FakeService):
+            async def geocode(self, address, city=None):
+                return Location(longitude=116.4074, latitude=39.9042)
+
+        service = _Centered(
+            pois_by_keyword={
+                "亲子": [
+                    {
+                        "id": "F1",
+                        "name": "百里山水画廊",
+                        "type": "110202",
+                        "address": "延庆区千家店镇",
+                    },
+                    {
+                        "id": "M1",
+                        "name": "首都博物馆",
+                        "type": "140200",
+                        "address": "复兴门外大街16号",
+                    },
+                ]
+            },
+            details={
+                "F1": {"location": "116.75,40.55"},
+                "M1": {"location": "116.34,39.91"},
+            },
+        )
+        monkeypatch.setattr(trip_retrieval, "get_amap_service", lambda: service)
+
+        text = asyncio.run(
+            trip_retrieval.retrieve_attractions(
+                _request(
+                    preferences=["亲子", "休闲"],
+                    free_text_input="带六岁小孩,少走路",
+                )
+            )
+        )
+
+        assert text.index("首都博物馆") < text.index("百里山水画廊")
+        assert "距城市中心" in text
+
+    def test_compact_route_removes_far_candidates_when_local_pool_is_enough(
+        self, monkeypatch
+    ):
+        class _Centered(_FakeService):
+            async def geocode(self, address, city=None):
+                return Location(longitude=116.4074, latitude=39.9042)
+
+        service = _Centered(
+            pois_by_keyword={
+                "亲子": [
+                    {
+                        "id": "L1",
+                        "name": "南苑森林湿地公园",
+                        "type": "110202",
+                        "address": "槐房路42号",
+                    },
+                    {
+                        "id": "L2",
+                        "name": "北坞公园",
+                        "type": "110202",
+                        "address": "颐和园西门外",
+                    },
+                    {
+                        "id": "L3",
+                        "name": "千灵山",
+                        "type": "110202",
+                        "address": "王佐镇西庄店村北",
+                    },
+                    {
+                        "id": "F1",
+                        "name": "北京金海湖风景区",
+                        "type": "110202",
+                        "address": "金海湖镇坝前广场路1号",
+                    },
+                ]
+            },
+            details={
+                "L1": {"location": "116.378504,39.820418"},
+                "L2": {"location": "116.256600,39.986214"},
+                "L3": {"location": "116.085523,39.860994"},
+                "F1": {"location": "117.301097,40.180720"},
+            },
+        )
+        monkeypatch.setattr(trip_retrieval, "get_amap_service", lambda: service)
+
+        text = asyncio.run(
+            trip_retrieval.retrieve_attractions(
+                _request(
+                    preferences=["亲子", "休闲"],
+                    free_text_input="带六岁小孩,少走路",
+                )
+            )
+        )
+
+        assert "南苑森林湿地公园" in text
+        assert "北京金海湖风景区" not in text
 
     def test_falls_back_to_generic_keyword(self, monkeypatch):
         service = _FakeService()

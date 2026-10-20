@@ -110,11 +110,28 @@ async def _run_live_case(
 async def _live_results(
     cases: List[Dict[str, Any]],
     backend_url: str,
+    *,
+    isolate_memory: bool,
 ) -> List[Dict[str, Any]]:
     results = []
     async with httpx.AsyncClient(timeout=330.0) as client:
         client.headers.update(await get_auth_headers(client, backend_url))
+        user_id = None
+        if isolate_memory:
+            me = await client.get(f"{backend_url}/api/auth/me")
+            if me.status_code == 200:
+                user_id = me.json().get("user_id")
+
         for index, case in enumerate(cases, start=1):
+            if user_id:
+                cleared = await client.delete(
+                    f"{backend_url}/api/memory/{user_id}"
+                )
+                if cleared.status_code != 200:
+                    raise RuntimeError(
+                        "评测记忆隔离失败"
+                        f"({cleared.status_code}): {cleared.text[:200]}"
+                    )
             print(
                 f"[{index}/{len(cases)}] live {case['id']} "
                 f"({case['request']['city']} {case['request']['travel_days']}天)",
@@ -176,6 +193,11 @@ def _parse_args() -> argparse.Namespace:
         help="确认 live 模式会真实消耗模型调用额度",
     )
     parser.add_argument(
+        "--keep-evaluation-memory",
+        action="store_true",
+        help="live 模式保留账号已有偏好;默认每个 case 前清空专用账号记忆",
+    )
+    parser.add_argument(
         "--fail-under",
         type=float,
         default=0.0,
@@ -208,7 +230,11 @@ async def _main(args: argparse.Namespace) -> int:
             raise ValueError(
                 "live 模式会真实消耗模型额度;确认后请同时传入 --yes-live"
             )
-        results = await _live_results(selected, args.backend_url)
+        results = await _live_results(
+            selected,
+            args.backend_url,
+            isolate_memory=not args.keep_evaluation_memory,
+        )
         backend = args.backend_url
     else:
         if args.input is None:
