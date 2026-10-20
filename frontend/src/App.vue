@@ -2,9 +2,14 @@
   <div id="app">
     <a-layout style="min-height: 100vh">
       <a-layout-header class="app-header">
-        <div class="app-brand">
+        <router-link class="app-brand" to="/">
           🌍 HelloAgents智能旅行助手
-        </div>
+        </router-link>
+        <nav v-if="authUser" class="app-nav">
+          <router-link to="/" exact-active-class="active">规划</router-link>
+          <router-link to="/chat" active-class="active">聊天</router-link>
+          <router-link to="/history" active-class="active">历史行程</router-link>
+        </nav>
         <div v-if="authUser" class="account-box">
           <span class="account-name">👤 {{ authUser.username }}</span>
           <a-button type="link" class="logout-button" @click="handleLogout">
@@ -75,12 +80,36 @@ onUnmounted(() => {
   color: white;
   font-size: 24px;
   font-weight: bold;
+  text-decoration: none;
+  flex: none;
+}
+
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 28px;
+}
+
+.app-nav a {
+  color: #9fb0d0;
+  padding: 6px 14px;
+  border-radius: 8px;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.app-nav a:hover,
+.app-nav a.active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .account-box {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
 }
 
 .account-name {

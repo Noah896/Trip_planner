@@ -132,6 +132,41 @@ class TestMustVisitPrompt:
         assert "不能漏" in prompt
 
 
+class TestOptionalPreferencePrompt:
+    def test_prompt_requires_one_time_preference_confirmation(self):
+        prompt = chat_service.CHAT_SYSTEM_PROMPT
+
+        assert "一次性注意事项确认" in prompt
+        assert "同行人、饮食忌口" in prompt
+        assert "不要照抄固定句式" in prompt
+        assert "后续任何回复都不得再次询问" in prompt
+
+    def test_prompt_no_longer_contains_one_fixed_preference_ending(self):
+        prompt = chat_service.CHAT_SYSTEM_PROMPT
+        assert "另外有没有同行老人或小孩、饮食忌口、行动便利性" not in prompt
+        assert "{preference_style}" in prompt
+
+    def test_rendered_prompt_uses_a_random_style_hint(self):
+        prompts = [chat_service.build_system_prompt() for _ in range(12)]
+
+        assert all("{preference_style}" not in prompt for prompt in prompts)
+        assert any(
+            style in prompt
+            for prompt in prompts
+            for style in chat_service.OPTIONAL_PREFERENCE_STYLES
+        )
+
+    def test_fallback_question_uses_paraphrase_pool(self, monkeypatch):
+        expected = chat_service.OPTIONAL_PREFERENCE_QUESTIONS[2]
+        monkeypatch.setattr(
+            chat_service.random,
+            "choice",
+            lambda values: values[2],
+        )
+
+        assert chat_service.build_optional_preference_question() == expected
+
+
 class TestRecommendationVariety:
     """用户报:让助手推荐景点,永远是那几个。
 
@@ -171,6 +206,34 @@ class TestRecommendationVariety:
 
 
 class TestDecisionTolerance:
+    def test_placeholder_strings_are_removed_from_slots(self):
+        decision = ChatDecision.model_validate(
+            {
+                "intent": "plan",
+                "city": "北京",
+                "transportation": "None",
+                "accommodation": "null",
+                "free_text_input": "无",
+                "preferences": "None",
+                "must_visit": ["null", "  "],
+            }
+        )
+
+        assert decision.transportation is None
+        assert decision.accommodation is None
+        assert decision.free_text_input == ""
+        assert decision.preferences == []
+        assert decision.must_visit == []
+
+        trip = build_trip_request(
+            decision.model_copy(
+                update={"start_date": "2026-11-01", "travel_days": 3}
+            )
+        )
+        assert trip is not None
+        assert trip.transportation == chat_service.DEFAULT_TRANSPORTATION
+        assert trip.accommodation == chat_service.DEFAULT_ACCOMMODATION
+
     def test_preferences_written_as_string(self):
         """模型偶尔把数组写成 "历史文化、美食",不能因此整轮失败。"""
         decision = ChatDecision.model_validate(
@@ -298,9 +361,16 @@ def _tool_model(raw_json: str, piece: int = 8):
     return _Model()
 
 
-def _stream(model) -> list:
+def _stream(model, message: str = "你好", history=None) -> list:
     async def run():
-        return [item async for item in chat_service.decide_streaming("你好", [], model=model)]
+        return [
+            item
+            async for item in chat_service.decide_streaming(
+                message,
+                history or [],
+                model=model,
+            )
+        ]
 
     return asyncio.run(run())
 
@@ -363,7 +433,7 @@ class TestStreamingReply:
     def test_decision_is_still_parsed_from_full_args(self):
         raw = (
             '{"intent": "plan", "reply": "好的，北京 3 天", "city": "北京",'
-            ' "travel_days": "三天", "missing": []}'
+            ' "travel_days": "三天", "preferences": ["历史文化"], "missing": []}'
         )
         items = _stream(_tool_model(raw))
 
@@ -371,6 +441,143 @@ class TestStreamingReply:
         assert decision.intent == "plan"
         assert decision.city == "北京"
         assert decision.travel_days == 3  # 容错校验照旧生效
+
+    def test_clarify_for_known_city_also_asks_optional_preferences(self):
+        raw = (
+            '{"intent": "clarify", "reply": "请问什么时候出发、计划玩几天?",'
+            ' "city": "成都", "missing": ["出发日期", "行程天数"]}'
+        )
+        items = _stream(_tool_model(raw), message="我想去成都")
+
+        decision = items[-1]["decision"]
+        assert decision.intent == "clarify"
+        assert "什么时候出发" in decision.reply
+        assert chat_service._PREFERENCE_QUESTION_PATTERN.search(decision.reply)
+        assert any("注意事项" in item for item in decision.missing)
+        assert items[-1]["streamed"] == decision.reply
+
+    def test_missing_city_does_not_ask_diet_or_companions_yet(self):
+        raw = (
+            '{"intent": "clarify", "reply": "你想去哪个城市?",'
+            ' "missing": ["目的地"]}'
+        )
+        decision = _stream(_tool_model(raw), message="随便推荐一个")[-1]["decision"]
+
+        assert decision.reply == "你想去哪个城市?"
+        assert not chat_service._PREFERENCE_QUESTION_PATTERN.search(decision.reply)
+
+    def test_complete_plan_waits_once_for_preference_confirmation(self):
+        raw = (
+            '{"intent": "plan", "reply": "好的，马上开始规划", "city": "成都",'
+            ' "start_date": "2026-11-20", "end_date": "2026-11-22",'
+            ' "travel_days": 3, "missing": []}'
+        )
+        items = _stream(
+            _tool_model(raw),
+            message="我想去成都,11月20到22号",
+        )
+
+        decision = items[-1]["decision"]
+        assert decision.intent == "clarify"
+        assert "成都" in decision.reply
+        assert chat_service._PREFERENCE_QUESTION_PATTERN.search(decision.reply)
+        assert "开始规划成都行程前" in decision.reply
+
+    def test_preference_question_is_not_repeated_after_it_was_asked(self):
+        raw = (
+            '{"intent": "plan", "reply": "好的，现在开始规划", "city": "成都",'
+            ' "start_date": "2026-11-20", "end_date": "2026-11-22",'
+            ' "travel_days": 3, "missing": []}'
+        )
+        history = [
+            ChatMessage(
+                role="assistant",
+                content=chat_service.OPTIONAL_PREFERENCE_QUESTION,
+            )
+        ]
+        decision = _stream(
+            _tool_model(raw),
+            message="没有特别要求",
+            history=history,
+        )[-1]["decision"]
+
+        assert decision.intent == "plan"
+        assert "现在开始规划" in decision.reply
+
+    def test_user_can_decline_optional_preferences_in_same_turn(self):
+        raw = (
+            '{"intent": "plan", "reply": "好的，现在开始规划", "city": "北京",'
+            ' "start_date": "2026-11-01", "end_date": "2026-11-03",'
+            ' "travel_days": 3, "missing": []}'
+        )
+        decision = _stream(
+            _tool_model(raw),
+            message="北京三天，没有特别要求",
+        )[-1]["decision"]
+
+        assert decision.intent == "plan"
+
+    def test_explicit_notes_allow_planning_without_extra_question(self):
+        raw = (
+            '{"intent": "plan", "reply": "好的，现在开始规划", "city": "成都",'
+            ' "start_date": "2026-11-20", "end_date": "2026-11-22",'
+            ' "travel_days": 3, "preferences": ["带小孩", "不吃辣"],'
+            ' "missing": []}'
+        )
+        decision = _stream(
+            _tool_model(raw),
+            message="成都三天，带小孩，不吃辣",
+        )[-1]["decision"]
+
+        assert decision.intent == "plan"
+        assert decision.preferences == ["带小孩", "不吃辣"]
+
+    def test_complete_clarification_is_promoted_after_preferences_were_given(
+        self,
+    ):
+        decision = ChatDecision(
+            intent="clarify",
+            reply="请问哪天回来?",
+            city="北京",
+            start_date="2026-10-24",
+            travel_days=3,
+            preferences=["带小孩"],
+        )
+
+        trip = chat_service.promote_complete_clarification(
+            decision,
+            "下周末出发,带一个六岁的小孩",
+            [
+                ChatMessage(
+                    role="assistant",
+                    content=chat_service.OPTIONAL_PREFERENCE_QUESTION,
+                )
+            ],
+        )
+
+        assert trip is not None
+        assert trip.travel_days == 3
+        assert trip.end_date == date(2026, 10, 26)
+
+    def test_complete_clarification_is_not_promoted_before_notes_confirmation(
+        self,
+    ):
+        decision = ChatDecision(
+            intent="clarify",
+            reply="还有同行人或饮食忌口吗?",
+            city="北京",
+            start_date="2026-10-24",
+            travel_days=3,
+        )
+
+        assert (
+            chat_service.promote_complete_clarification(
+                decision,
+                "北京下周末玩三天",
+                [],
+            )
+            is None
+        )
 
     def test_run_chat_emits_deltas_that_concatenate(self, monkeypatch):
         """run_chat 里出现多条 message 事件,拼起来正好是那句话。"""
@@ -412,6 +619,21 @@ class TestFormatContext:
 
     def test_empty_message_is_marked(self):
         assert "(空)" in chat_service._format_context("", [], date(2026, 10, 16))
+
+    def test_already_asked_preferences_are_marked_as_do_not_repeat(self):
+        text = chat_service._format_context(
+            "湖南郴州有什么好玩的",
+            [
+                ChatMessage(
+                    role="assistant",
+                    content=chat_service.OPTIONAL_PREFERENCE_QUESTION,
+                )
+            ],
+            date(2026, 10, 20),
+        )
+
+        assert "注意事项确认状态" in text
+        assert "绝对不要再次询问" in text
 
 
 # ---------- run_chat 的事件流 ----------
@@ -475,6 +697,97 @@ def _collect(request: ChatRequest, monkeypatch, decision=None, planner_events=No
 
 
 class TestRunChat:
+    def test_plan_waits_for_one_time_preference_confirmation(
+        self, monkeypatch
+    ):
+        raw = (
+            '{"intent": "plan", "reply": "好的，马上开始规划", "city": "成都",'
+            ' "start_date": "2026-11-20", "end_date": "2026-11-22",'
+            ' "travel_days": 3, "missing": []}'
+        )
+
+        class _PlannerMustNotRun:
+            async def plan_trip_stream(self, trip):
+                raise AssertionError("确认注意事项前不应开始规划")
+                yield {}
+
+        monkeypatch.setattr(
+            chat_service,
+            "_get_router_model",
+            lambda: _tool_model(raw),
+        )
+        monkeypatch.setattr(
+            chat_service,
+            "get_trip_planner_agent",
+            lambda: _PlannerMustNotRun(),
+        )
+
+        async def run():
+            return [
+                event
+                async for event in chat_service.run_chat(
+                    ChatRequest(message="我想去成都,11月20到22号")
+                )
+            ]
+
+        events = asyncio.run(run())
+
+        assert events[0]["type"] == "message"
+        assert events[-1]["type"] == "done"
+        text = "".join(
+            event["text"] for event in events if event["type"] == "message"
+        )
+        assert "马上开始规划" in text
+        assert chat_service._PREFERENCE_QUESTION_PATTERN.search(text)
+
+    def test_complete_clarification_is_corrected_and_planning_continues(
+        self, monkeypatch
+    ):
+        raw = (
+            '{"intent": "clarify", "reply": "请问计划哪天回来?", "city": "北京",'
+            ' "start_date": "2026-10-24", "travel_days": 3,'
+            ' "preferences": ["带小孩"], "missing": ["返程日期"]}'
+        )
+        agent = _FakePlanner(_planning_events())
+        monkeypatch.setattr(
+            chat_service,
+            "_get_router_model",
+            lambda: _tool_model(raw),
+        )
+        monkeypatch.setattr(
+            chat_service,
+            "get_trip_planner_agent",
+            lambda: agent,
+        )
+
+        async def run():
+            return [
+                event
+                async for event in chat_service.run_chat(
+                    ChatRequest(
+                        message="下周末出发,带一个六岁小孩,玩三天",
+                        history=[
+                            ChatMessage(
+                                role="assistant",
+                                content=chat_service.OPTIONAL_PREFERENCE_QUESTION,
+                            )
+                        ],
+                    )
+                )
+            ]
+
+        events = asyncio.run(run())
+        messages = "".join(
+            event["text"] for event in events if event["type"] == "message"
+        )
+        artifact = next(
+            event for event in events if event["type"] == "artifact"
+        )
+
+        assert "信息已经足够" in messages
+        assert artifact["request"]["travel_days"] == 3
+        assert artifact["request"]["preferences"] == ["带小孩"]
+
     def test_plan_intent_streams_progress_then_artifact(self, monkeypatch):
         events = _collect(
             ChatRequest(message="北京玩三天,下周末"),

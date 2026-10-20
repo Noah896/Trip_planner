@@ -139,6 +139,28 @@ export interface TripPlanResponse {
 
 
 
+export interface HistoryTripSummary {
+  id: number
+  session_id: string
+  city: string
+  start_date: string
+  end_date: string
+  travel_days: number
+  preferences: string[]
+  overview: string
+  attraction_names: string[]
+  created_at: string
+}
+
+export interface HistoryTripListResponse {
+  total: number
+  items: HistoryTripSummary[]
+}
+
+export interface HistoryTripDetail extends HistoryTripSummary {
+  request: TripFormData
+  plan: TripPlan
+}
 // ---------- /api/trip/plan/stream 的 SSE 事件 ----------
 
 /** 某一步的进度(景点检索 / 天气查询 / 酒店检索 / 生成行程) */

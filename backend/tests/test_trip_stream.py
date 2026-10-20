@@ -91,6 +91,13 @@ class _HangingGraph:
         yield {}
 
 
+class _HangingInitPlanner(MultiAgentTripPlanner):
+    """首次惰性建图永远不返回。"""
+
+    async def _ensure_graph(self):
+        await asyncio.sleep(3600)
+
+
 class _StreamPlanner(MultiAgentTripPlanner):
     """绕过建图,直接喂替身图。"""
 
@@ -240,6 +247,22 @@ class TestDegradedPaths:
 
         monkeypatch.setattr(get_settings(), "plan_total_timeout", 1)
         events = _collect(_HangingGraph())
+
+        assert events[-1]["degraded"] is True
+        assert "规划超时" in events[-1]["reason"]
+
+    def test_timeout_also_covers_lazy_graph_initialization(self, monkeypatch):
+        from app.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "plan_total_timeout", 1)
+
+        async def run():
+            return [
+                event
+                async for event in _HangingInitPlanner().plan_trip_stream(_request())
+            ]
+
+        events = asyncio.run(run())
 
         assert events[-1]["degraded"] is True
         assert "规划超时" in events[-1]["reason"]

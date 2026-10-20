@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from ...models.schemas import ChatRequest
 from ...services import chat_service
 from ..auth_dependencies import AuthContext, get_auth_context
+from ..quota_dependencies import model_quota_headers, reserve_model_quota
 
 router = APIRouter(prefix="/chat", tags=["对话式规划"])
 
@@ -52,6 +53,10 @@ async def chat_stream(
             update={"user_id": context.user.user_id, "trip": trip}
         )
 
+    # 自然语言最多会调用两次模型(意图识别 + 规划),在流开始前按上限预占;
+    # 结构化直传跳过意图识别,只预占一次规划调用。
+    quota = reserve_model_quota(context, 1 if payload.trip is not None else 2)
+
     preview = (payload.message or "").strip()[:40]
     print(f"\n💬 收到对话请求: {preview!r}" + ("(结构化直传)" if payload.trip else ""))
 
@@ -73,5 +78,6 @@ async def chat_stream(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            **model_quota_headers(quota),
         },
     )

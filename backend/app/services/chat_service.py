@@ -50,6 +50,16 @@ DEFAULT_ACCOMMODATION = "经济型酒店"
 
 # 喂给意图识别的历史最多保留多少条(再长也没用,只推高成本)
 MAX_HISTORY = 10
+_EMPTY_SLOT_VALUES = {
+    "",
+    "none",
+    "null",
+    "undefined",
+    "nan",
+    "未指定",
+    "未知",
+    "无",
+}
 
 
 class ChatDecision(BaseModel):
@@ -85,18 +95,52 @@ class ChatDecision(BaseModel):
     free_text_input: str = Field(default="", description="其它明确要求")
     missing: List[str] = Field(default_factory=list, description="还缺哪些信息(中文名)")
 
+    @field_validator(
+        "city",
+        "start_date",
+        "end_date",
+        "transportation",
+        "accommodation",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_empty_slots(cls, value: Any) -> Any:
+        """清洗模型常写的 ``"None"`` / ``"null"`` / ``"未指定"`` 占位值。"""
+        if value is None:
+            return None
+        text = str(value).strip()
+        return None if text.casefold() in _EMPTY_SLOT_VALUES else text
+
+    @field_validator("free_text_input", mode="before")
+    @classmethod
+    def _normalize_empty_free_text(cls, value: Any) -> Any:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        return "" if text.casefold() in _EMPTY_SLOT_VALUES else text
+
     @field_validator("preferences", "missing", "must_visit", mode="before")
     @classmethod
     def _accept_string_lists(cls, value: Any) -> Any:
         """容忍模型把数组写成 ``"历史文化、美食"`` 这种字符串(实测会发生)。"""
+        def clean(values: List[Any]) -> List[str]:
+            result = []
+            for item in values:
+                text = str(item).strip()
+                if text and text.casefold() not in _EMPTY_SLOT_VALUES:
+                    result.append(text)
+            return result
+
         if isinstance(value, str):
             text = value.strip()
-            if not text:
+            if not text or text.casefold() in _EMPTY_SLOT_VALUES:
                 return []
             for sep in ("、", ",", ";", "/", " "):
                 if sep in text:
-                    return [part.strip() for part in text.split(sep) if part.strip()]
-            return [text]
+                    return clean(text.split(sep))
+            return clean([text])
+        if isinstance(value, list):
+            return clean(value)
         return value
 
     @field_validator("intent", mode="before")
@@ -145,7 +189,7 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 **intent 只能取四个值:**
 - `plan`:信息够了,可以直接生成行程(至少要有城市 + 一段明确时间)
 - `refine`:上下文里有「上一版行程」,用户是在修改它(如"第二天换成博物馆")
-- `clarify`:缺关键信息,需要追问(最常见的是没说什么时候去、去几天)
+- `clarify`:缺关键信息,需要追问(没说时间/天数,或还没确认同行人与注意事项)
 - `chat`:用户在闲聊、或问一次性问题(如"你能做什么""介绍一下你自己")
 
 **范围约束(重要,必须遵守):**
@@ -187,6 +231,8 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
    - 用户说了**时长**(如"三天""一周")→ 只填 `travel_days`;
    - **永远不要自己推算返程日期**:`end_date` 只有在用户明确说了返程日时才有值。
      实测过模型把"三天"算成"两天",导致行程少一天 —— 这类推算全部交给后端做。
+   - **出发时间 + 时长已经足够开始规划**。即使没有返程日,也不要追问"哪天回来";
+     后端会自动用 `start_date + travel_days` 推出 `end_date`。
    - 但相对时间仍要换算成具体日期(用户消息里会给出"今天是 X",以此为基准):
      "下周末"、"国庆"、"后天" 这些属于**用户没说绝对日期**,需要你算。
    - **用户完全没提时间时(既没有具体日期,也没有"下周末/国庆/三天后"这类说法),
@@ -204,6 +250,28 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
    "故宫博物院")放进 `must_visit`,不能只留在对话里。这一条**不能漏**:
    漏了的话下游检索不到它,规划就会把用户选的景点当成普通候选、甚至排掉。
    注意区分:`must_visit` 是"一定要去的具体地点",`preferences` 只是"偏好类型"。
+
+**一次性注意事项确认(重要):**
+
+当用户已经明确目的地,但还没有开始规划时,除了日期和天数,也要顺手确认一次
+**同行人、饮食忌口、行动便利性、节奏偏好、必去地点**等注意事项。
+
+本轮表达风格提示:**{preference_style}**。只表达相同的语义,
+不要照抄固定句式,不要每次都使用同一种结尾。
+
+1. 如果缺日期或天数,`intent=clarify`。回复里必须同时问清缺的必填项
+   **和**注意事项,但措辞、语序、长短应自然变化,不需要列出完全相同的固定清单。
+2. 如果城市、日期、天数都已齐全,但用户没提供任何偏好/注意事项,
+   并且历史里还没问过这件事:仍然先返回 `clarify`,做这一轮一次性确认。
+3. 如果用户回答"没有特别要求""按默认安排""都可以",或者已经提供任意偏好,
+   就直接进入 `plan`,**不要重复追问**。
+4. **只要历史消息里已经问过注意事项,后续任何回复都不得再次询问同一组内容**。
+   用户聊景点、修改条件或补充日期时都不要复读;如果因此已具备规划条件,直接 `plan`。
+5. 只有城市都还没确定时,不要急着问饮食和同行人;先把目的地问清。
+6. 如果本轮已经抽到 `带小孩 / 带老人 / 不吃辣` 等任意偏好,视为注意事项已回答,
+   **绝不能在同一轮再问一遍**。
+7. `clarify` 只用于真正缺失的关键信息。返程日期可由出发日 + 天数推导,
+   交通和住宿有系统默认值,都不能成为继续追问的理由。
 
 **会话内修改(只在出现了「上一版行程」时使用):**
 
@@ -272,7 +340,12 @@ def build_system_prompt() -> str:
     """
     sample = random.sample(RECOMMENDATION_POOL, RECOMMENDATION_SAMPLE_SIZE)
     examples = "\n".join(f"- {city} · {spot} —— {why}" for city, spot, why in sample)
-    return CHAT_SYSTEM_PROMPT.replace("{examples}", examples)
+    style = random.choice(OPTIONAL_PREFERENCE_STYLES)
+    return (
+        CHAT_SYSTEM_PROMPT
+        .replace("{examples}", examples)
+        .replace("{preference_style}", style)
+    )
 
 # 意图识别用的模型:直接绑 ChatDecision 这个"工具"。
 #
@@ -339,12 +412,139 @@ def _normalize_escapes(text: str) -> str:
 
 _FALLBACK_REPLY = (
     "抱歉,我刚才没太理解。你可以直接告诉我:想去哪个城市、大概什么时候出发、玩几天,"
-    "比如「北京玩三天,下周末出发」。"
+    "有没有同行老人/小孩、饮食忌口等注意事项,比如「北京玩三天,下周末出发,带小孩、不吃辣」。"
 )
 
 
 def _fallback_decision() -> ChatDecision:
     return ChatDecision(intent="clarify", reply=_FALLBACK_REPLY, missing=["目的地", "出发日期"])
+
+
+OPTIONAL_PREFERENCE_QUESTIONS = (
+    "如果方便，也说说同行人里有没有老人或孩子、饮食上有哪些忌口，以及你更喜欢轻松还是紧凑的节奏。",
+    "我还想了解下：这趟有人需要特别照顾吗？吃东西有忌口吗？有没有一定要去的地方？",
+    "先补充一点会更好安排：同行老人或小孩、饮食限制、步行强度和必去地点，有需要特别说明的吗？",
+    "为了让行程更贴合你们，可以顺带告诉我同行人情况、饮食禁忌、行动便利性和喜欢的节奏。",
+    "还有哪些需要照顾的细节？比如孩子或老人、忌口、无障碍需求、想轻松逛还是多打卡。",
+    "如果你有同行小孩/老人、饮食忌口或必去地点，可以一起告诉我；没有就按常规节奏安排。",
+)
+OPTIONAL_PREFERENCE_QUESTION = OPTIONAL_PREFERENCE_QUESTIONS[0]
+OPTIONAL_PREFERENCE_STYLES = (
+    "像朋友聊天一样自然口语",
+    "简短直接，两三句内问完",
+    "先回应上一条，再顺带补充确认",
+    "温和细致，但不要列成长清单",
+    "稍微活泼一点，避免公文腔",
+    "先给一个简单建议，再问注意事项",
+    "用生活化例子提醒，不要机械罗列",
+    "语气克制简洁，只保留必要信息",
+)
+_PREFERENCE_QUESTION_PATTERN = re.compile(
+    r"(同行人|同行者|同行老人|同行小孩|带小孩|带老人|"
+    r"饮食(?:忌口|禁忌|限制)|忌口|行动(?:不便|便利)|无障碍|"
+    r"节奏(?:偏好)?|步行强度|特别要求)"
+)
+_OPTIONAL_DECLINED_PATTERN = re.compile(
+    r"(没有(特别|其他|什么|啥)?要求|没啥要求|无特殊要求|没有忌口|没忌口|"
+    r"按默认|默认安排|都可以|随意安排|不用特别安排)"
+)
+
+
+def _preference_question_was_asked(history: Sequence[ChatMessage]) -> bool:
+    """判断上一轮助手是否已经问过同行人/忌口等注意事项。"""
+    return any(
+        item.role == "assistant"
+        and bool(_PREFERENCE_QUESTION_PATTERN.search(item.content))
+        for item in history[-MAX_HISTORY:]
+    )
+
+
+def _optional_preferences_declined(message: str) -> bool:
+    return bool(_OPTIONAL_DECLINED_PATTERN.search(message or ""))
+
+
+def build_optional_preference_question() -> str:
+    """生成一条随机措辞的注意事项追问,避免固定结尾。"""
+    return random.choice(OPTIONAL_PREFERENCE_QUESTIONS)
+
+
+def _has_explicit_optional_preferences(decision: ChatDecision) -> bool:
+    return bool(
+        decision.preferences
+        or (decision.free_text_input or "").strip()
+    )
+
+
+def enforce_optional_preference_check(
+    decision: ChatDecision,
+    message: str,
+    history: Sequence[ChatMessage],
+) -> ChatDecision:
+    """确保目的地明确后只确认一次注意事项,同时不把可选问题变成永久门槛。"""
+    if decision.intent not in {"clarify", "plan"}:
+        return decision
+    if not (decision.city or "").strip():
+        return decision
+    if _has_explicit_optional_preferences(decision):
+        return decision
+    if _optional_preferences_declined(message):
+        return decision
+    if _PREFERENCE_QUESTION_PATTERN.search(decision.reply or ""):
+        return decision
+    if _preference_question_was_asked(history):
+        return decision
+
+    if decision.intent == "clarify":
+        reply = (decision.reply or "").strip()
+        if reply:
+            reply += "\n\n"
+        reply += build_optional_preference_question()
+        return decision.model_copy(
+            update={
+                "reply": reply,
+                "missing": [
+                    *(decision.missing or []),
+                    "同行人/饮食忌口等注意事项(可选)",
+                ],
+            }
+        )
+
+    city = decision.city.strip()
+    reply = (decision.reply or "").strip()
+    if reply:
+        reply += "\n\n"
+    reply += (
+        f"开始规划{city}行程前，我还想确认一次注意事项。\n"
+        f"{build_optional_preference_question()}"
+    )
+    return decision.model_copy(
+        update={
+            "intent": "clarify",
+            "reply": reply,
+            "missing": ["同行人/饮食忌口等注意事项(可选)"],
+        }
+    )
+
+
+def promote_complete_clarification(
+    decision: ChatDecision,
+    message: str,
+    history: Sequence[ChatMessage],
+) -> Optional[TripRequest]:
+    """模型误把可推导槽位当成缺失时,按确定性规则纠正。
+
+    仅当城市 / 出发时间 / 天数已经能组装出 ``TripRequest``,且注意事项
+    已经由用户提供、用户明确拒绝、或上一轮已经问过时,才提升为可规划状态。
+    """
+    if decision.intent != "clarify":
+        return None
+    if not (
+        _has_explicit_optional_preferences(decision)
+        or _optional_preferences_declined(message)
+        or _preference_question_was_asked(history)
+    ):
+        return None
+    return build_trip_request(decision)
 
 
 def _format_session_context(session: SessionMemory) -> str:
@@ -417,6 +617,13 @@ def _format_context(
         lines.append("")
 
     recent = list(history)[-MAX_HISTORY:]
+    if _preference_question_was_asked(recent):
+        lines.append(
+            "【注意事项确认状态】历史中已经询问过同行人、饮食忌口、行动便利性、"
+            "节奏或必去地点。本轮绝对不要再次询问这组内容,也不要复述固定清单。"
+        )
+        lines.append("")
+
     if recent:
         lines.append("【对话历史】")
         for item in recent:
@@ -718,6 +925,10 @@ async def decide_streaming(
     if decision is None:
         decision = _fallback_decision()
 
+    # 模型很容易把"城市 + 时间"当成全部条件;这里做一次确定性兜底:
+    # 目的地明确后,同行人 / 忌口 / 节奏等注意事项只确认一次。
+    decision = enforce_optional_preference_check(decision, message, history)
+
     # 把"最终决定要说的"和"已经流出去的"对齐:少了的补上,不看半句、也不重复。
     reply = _normalize_escapes(decision.reply or "")
     common = 0
@@ -821,6 +1032,25 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
             decision = _fallback_decision()
             yield {"type": "message", "text": decision.reply}
 
+        promoted_trip: Optional[TripRequest] = None
+        if history_template is None:
+            promoted_trip = promote_complete_clarification(
+                decision,
+                request.message,
+                request.history,
+            )
+            if promoted_trip is not None:
+                decision = decision.model_copy(update={"intent": "plan"})
+                yield {
+                    "type": "message",
+                    "text": (
+                        f"\n\n你的信息已经足够了：{promoted_trip.city} "
+                        f"{promoted_trip.travel_days} 天"
+                        f"（{promoted_trip.start_date} 至 {promoted_trip.end_date}）。"
+                        "我不再继续追问，现在直接开始规划；后续仍可基于结果继续修改。"
+                    ),
+                }
+
         if decision.intent == "refine" and history_template is None:
             if previous_memory is None:
                 yield {
@@ -860,8 +1090,18 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
                 user_context="\n".join(user_texts),
             )
         elif not is_refine:
-            trip = build_trip_request(
-                decision, session_id=session_id or None, user_id=user_id or None
+            trip = (
+                _with_identity(
+                    promoted_trip,
+                    session_id=session_id,
+                    user_id=user_id,
+                )
+                if promoted_trip is not None
+                else build_trip_request(
+                    decision,
+                    session_id=session_id or None,
+                    user_id=user_id or None,
+                )
             )
         if trip is None:
             # 模型判定"可以规划"但槽位拼不出来。这时候那句话**已经流出去了**

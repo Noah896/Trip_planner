@@ -19,4 +19,7 @@ def _disable_auth_by_default(monkeypatch):
     """旧功能测试默认不构造 Bearer token;鉴权专项测试会显式覆盖为 True。"""
     from app.config import get_settings
 
-    monkeypatch.setattr(get_settings(), "auth_enabled", False)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auth_enabled", False)
+    # 没有登录用户时不预占模型配额,避免旧用例写入真实 data/ 数据库。
+    monkeypatch.setattr(settings, "model_quota_enabled", False)

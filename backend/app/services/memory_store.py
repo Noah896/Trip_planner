@@ -344,6 +344,21 @@ class MemoryStore:
             ),
         )
 
+    @staticmethod
+    def _row_to_history(row: sqlite3.Row) -> HistoryMemory:
+        return HistoryMemory(
+            id=int(row["id"]),
+            user_id=row["user_id"],
+            session_id=row["session_id"],
+            city=row["city"],
+            start_date=row["start_date"] or "",
+            end_date=row["end_date"] or "",
+            request=json.loads(row["request_json"]),
+            plan=json.loads(row["plan_json"]),
+            preferences=list(json.loads(row["preference_snapshot"])),
+            created_at=row["created_at"],
+        )
+
     def get_facts(
         self,
         user_id: str,
@@ -390,20 +405,22 @@ class MemoryStore:
         *,
         city: Optional[str] = None,
         limit: int = 10,
+        offset: int = 0,
     ) -> List[HistoryMemory]:
-        """按用户读取最近的成功行程,可选按城市精确过滤。"""
+        """按用户分页读取最近的成功行程,可选按城市精确过滤。"""
         user_id = (user_id or "").strip()
         if not user_id:
             return []
 
         bounded_limit = max(1, min(int(limit), 50))
+        bounded_offset = max(0, int(offset))
         clauses = ["user_id = ?", "degraded = 0"]
         params: List[Any] = [user_id]
         city = (city or "").strip()
         if city:
             clauses.append("city = ?")
             params.append(city)
-        params.append(bounded_limit)
+        params.extend([bounded_limit, bounded_offset])
 
         self._ensure_schema()
         with self._connect() as connection:
@@ -414,26 +431,72 @@ class MemoryStore:
                 FROM trip_history
                 WHERE {' AND '.join(clauses)}
                 ORDER BY created_at DESC, id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
                 params,
             ).fetchall()
 
-        return [
-            HistoryMemory(
-                id=int(row["id"]),
-                user_id=row["user_id"],
-                session_id=row["session_id"],
-                city=row["city"],
-                start_date=row["start_date"] or "",
-                end_date=row["end_date"] or "",
-                request=json.loads(row["request_json"]),
-                plan=json.loads(row["plan_json"]),
-                preferences=list(json.loads(row["preference_snapshot"])),
-                created_at=row["created_at"],
+        return [self._row_to_history(row) for row in rows]
+
+    def count_trip_history(
+        self,
+        user_id: str,
+        *,
+        city: Optional[str] = None,
+    ) -> int:
+        """统计用户成功行程条数,供历史列表分页使用。"""
+        user_id = (user_id or "").strip()
+        if not user_id:
+            return 0
+        clauses = ["user_id = ?", "degraded = 0"]
+        params: List[Any] = [user_id]
+        city = (city or "").strip()
+        if city:
+            clauses.append("city = ?")
+            params.append(city)
+
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) AS total FROM trip_history WHERE {' AND '.join(clauses)}",
+                params,
+            ).fetchone()
+        return int(row["total"]) if row is not None else 0
+
+    def get_trip_history_item(
+        self,
+        user_id: str,
+        history_id: int,
+    ) -> Optional[HistoryMemory]:
+        """按 ID 读取用户自己的成功行程。"""
+        user_id = (user_id or "").strip()
+        if not user_id or int(history_id) <= 0:
+            return None
+        self._ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, user_id, session_id, city, start_date, end_date,
+                       request_json, plan_json, preference_snapshot, created_at
+                FROM trip_history
+                WHERE id = ? AND user_id = ? AND degraded = 0
+                """,
+                (int(history_id), user_id),
+            ).fetchone()
+        return self._row_to_history(row) if row is not None else None
+
+    def delete_trip_history_item(self, user_id: str, history_id: int) -> bool:
+        """删除用户自己的单条历史行程。"""
+        user_id = (user_id or "").strip()
+        if not user_id or int(history_id) <= 0:
+            return False
+        self._ensure_schema()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM trip_history WHERE id = ? AND user_id = ?",
+                (int(history_id), user_id),
             )
-            for row in rows
-        ]
+        return bool(cursor.rowcount)
 
     def upsert_fact(
         self,

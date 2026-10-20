@@ -49,6 +49,9 @@ htmlcov/
 data/*.sqlite3
 data/*.sqlite3-*
 
+# 评测产物
+evals/results/
+
 # 操作系统
 .DS_Store
 Thumbs.db

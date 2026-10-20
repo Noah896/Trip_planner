@@ -79,6 +79,20 @@ class Settings(BaseSettings):
     auth_allow_registration: bool = True
     # 非空时,注册必须提供相同邀请码。生产环境应设置该值或关闭公开注册。
     auth_registration_key: str = ""
+    # 同一用户名 + 来源 IP 在窗口期内允许的登录失败次数。
+    # 达到上限后,在最早一次失败滑出窗口前返回 429。
+    auth_login_max_failures: int = 5
+    auth_login_failure_window_seconds: int = 900
+    # 自托管生命周期管理密钥。为空时管理接口关闭。
+    auth_admin_key: str = ""
+    auth_password_reset_ttl_minutes: int = 15
+
+    # 按登录用户限制模型调用量。计数持久化到 SQLite,默认按北京时间自然日重置。
+    # 表单规划 = 1 单位;结构化聊天 = 1 单位;自然语言聊天按最多 2 次模型调用预占。
+    model_quota_enabled: bool = True
+    model_quota_db_path: str = "data/trip_model_quota.sqlite3"
+    model_quota_daily_call_limit: int = 30
+    model_quota_utc_offset_hours: int = 8
 
     # 兼容旧字段(保留以免破坏其他引用)
     openai_api_key: str = ""
@@ -161,6 +175,22 @@ def validate_config():
             "或设置 AUTH_ALLOW_REGISTRATION=false"
         )
 
+    if settings.model_quota_enabled and not settings.auth_enabled:
+        warnings.append(
+            "模型配额依赖登录用户身份;AUTH_ENABLED=false 时不会按用户限流"
+        )
+    admin_key = (settings.auth_admin_key or "").strip()
+    if (
+        settings.auth_enabled
+        and not admin_key
+        and not settings.is_development
+    ):
+        warnings.append(
+            "AUTH_ADMIN_KEY 未配置,账号禁用/启用和密码找回管理接口不会开放"
+        )
+    if admin_key and not settings.is_development and len(admin_key) < 32:
+        errors.append("生产环境 AUTH_ADMIN_KEY 至少需要 32 个字符")
+
     # LLM 凭据按优先级解析,缺失时只告警不阻断启动
     _, llm_api_key, _ = settings.resolve_llm_credentials()
     if not llm_api_key:
@@ -190,6 +220,14 @@ def print_config():
     print(
         f"账号鉴权: {'已启用' if settings.auth_enabled else '已关闭'};"
         f" 注册: {'开放' if settings.auth_allow_registration else '关闭'}"
+    )
+    print(
+        "账号管理接口: "
+        + ("已启用" if (settings.auth_admin_key or "").strip() else "已关闭")
+    )
+    print(
+        f"模型额度: {'启用' if settings.model_quota_enabled else '关闭'};"
+        f" 每日上限: {settings.model_quota_daily_call_limit} 单位"
     )
 
     # 检查LLM配置

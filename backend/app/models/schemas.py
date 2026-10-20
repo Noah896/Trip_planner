@@ -282,6 +282,44 @@ class HistoryUsageResponse(BaseModel):
     preferences: List[str] = Field(default=[], description="历史偏好快照")
 
 
+class HistoryTripSummaryResponse(BaseModel):
+    """历史行程列表中的一条摘要。"""
+
+    id: int = Field(..., description="历史行程 ID")
+    session_id: str = Field(..., description="生成该行程的会话 ID")
+    city: str = Field(..., description="目的地城市")
+    start_date: str = Field(..., description="出发日期")
+    end_date: str = Field(..., description="返程日期")
+    travel_days: int = Field(..., ge=1, description="旅行天数")
+    preferences: List[str] = Field(default=[], description="偏好快照")
+    overview: str = Field(default="", description="行程总体建议摘要")
+    attraction_names: List[str] = Field(
+        default=[], description="行程中前几个景点名称"
+    )
+    created_at: str = Field(..., description="保存时间")
+
+
+class HistoryTripListResponse(BaseModel):
+    """当前用户的历史行程分页结果。"""
+
+    total: int = Field(..., ge=0, description="符合条件的总条数")
+    items: List[HistoryTripSummaryResponse] = Field(default=[])
+
+
+class HistoryTripDetailResponse(HistoryTripSummaryResponse):
+    """历史行程详情,包含原始请求和完整结构化行程。"""
+
+    request: Dict[str, Any] = Field(..., description="当时的规划请求")
+    plan: TripPlan = Field(..., description="完整旅行计划")
+
+
+class HistoryTripDeleteResponse(BaseModel):
+    """删除单条历史行程的结果。"""
+
+    success: bool = True
+    history_id: int
+
+
 class TripPlanResponse(BaseModel):
     """旅行计划响应"""
     success: bool = Field(..., description="是否成功")
@@ -431,6 +469,57 @@ class AuthTokenResponse(BaseModel):
     token_type: Literal["bearer"] = "bearer"
     expires_at: str
     user: AuthUserResponse
+
+
+class AuthChangePasswordRequest(BaseModel):
+    """已登录用户修改密码。"""
+
+    current_password: str = Field(..., min_length=8, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class AuthPasswordResetConfirmRequest(BaseModel):
+    """使用一次性令牌设置新密码。"""
+
+    reset_token: str = Field(..., min_length=16, max_length=256)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class AuthPasswordResetResponse(BaseModel):
+    """管理员签发的一次性密码重置令牌。"""
+
+    user_id: str
+    username: str
+    reset_token: str
+    expires_at: str
+
+
+class AuthAccountStateResponse(BaseModel):
+    """账号启用状态。"""
+
+    user_id: str
+    username: str
+    disabled: bool
+
+
+class AuthAuditEventResponse(BaseModel):
+    """一条账号生命周期审计事件。"""
+
+    id: int
+    event_type: str
+    success: bool
+    user_id: Optional[str] = None
+    username: Optional[str] = None
+    client_hash: Optional[str] = None
+    detail: str = ""
+    created_at: str
+
+
+class AuthAuditListResponse(BaseModel):
+    """账号生命周期审计事件列表。"""
+
+    total: int = Field(..., ge=0)
+    events: List[AuthAuditEventResponse] = Field(default=[])
 
 
 class AuthStatusResponse(BaseModel):

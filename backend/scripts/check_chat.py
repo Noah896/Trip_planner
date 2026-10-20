@@ -28,18 +28,22 @@ from auth_client import get_auth_headers
 BACKEND_URL = os.getenv("TRIP_BACKEND_URL", "http://127.0.0.1:8000")
 CHAT_PATH = "/api/chat/stream"
 
-FIRST_MESSAGE = "我想去北京玩三天"
-SECOND_MESSAGE = "下周末出发,带一个六岁的小孩"
+FIRST_MESSAGE = os.getenv("TRIP_CHAT_FIRST_MESSAGE", "我想去北京玩三天")
+SECOND_MESSAGE = os.getenv(
+    "TRIP_CHAT_SECOND_MESSAGE",
+    "下周末出发,带一个六岁的小孩",
+)
 # 第一句话里说的天数 —— 用来回归检查"模型别自己算日期"
-EXPECTED_DAYS = 3
+EXPECTED_DAYS = int(os.getenv("TRIP_CHAT_EXPECTED_DAYS", "3"))
 
 
 async def send(
     client: httpx.AsyncClient, message: str, history: List[Dict[str, str]]
-) -> Optional[Dict[str, Any]]:
-    """发一轮,打印事件,返回最后那个 artifact(没有就返回 None)。"""
+) -> tuple[Optional[Dict[str, Any]], str]:
+    """发一轮,打印事件,返回 artifact 和助手完整回复文本。"""
     started = time.monotonic()
     artifact: Optional[Dict[str, Any]] = None
+    assistant_text = ""
 
     print(f"\n{'=' * 68}\n👤 用户:{message}\n{'=' * 68}")
     body = {"message": message, "history": history}
@@ -48,7 +52,7 @@ async def send(
         print(f"HTTP {response.status_code}  content-type={response.headers.get('content-type')}")
         if response.status_code != 200:
             print(await response.aread())
-            return None
+            return None, ""
 
         async for line in response.aiter_lines():
             if not line.startswith("data:"):
@@ -59,6 +63,7 @@ async def send(
             kind = event.get("type")
 
             if kind == "message":
+                assistant_text += event["text"]
                 print(f"  +{delta:6.1f}s  🤖 {event['text']}")
             elif kind == "progress":
                 print(
@@ -82,11 +87,11 @@ async def send(
                     print(f"        解析出的条件: {json.dumps(event['request'], ensure_ascii=False)}")
             elif kind == "error":
                 print(f"  +{delta:6.1f}s  ❌ {event['message']}")
-                return None
+                return None, assistant_text
             elif kind == "done":
                 print(f"  +{delta:6.1f}s  ✔ 本轮结束")
 
-    return artifact
+    return artifact, assistant_text
 
 
 async def main() -> int:
@@ -101,13 +106,15 @@ async def main() -> int:
             return 1
 
         # ---- 第 1 轮:只给城市和天数,期望被追问 ----
-        first = await send(client, FIRST_MESSAGE, history)
+        first, first_reply = await send(client, FIRST_MESSAGE, history)
         if first is not None:
             print("\n⚠️  第一轮就出结果了(预期是先追问日期)。模型行为有波动,不算错,但请留意。")
         history.append({"role": "user", "content": FIRST_MESSAGE})
+        if first_reply:
+            history.append({"role": "assistant", "content": first_reply})
 
         # ---- 第 2 轮:补齐时间,期望真的规划 ----
-        second = await send(client, SECOND_MESSAGE, history)
+        second, _ = await send(client, SECOND_MESSAGE, history)
         if second is not None:
             artifacts += 1
 

@@ -6,6 +6,7 @@ import App from './App.vue'
 import Home from './views/Home.vue'
 import Result from './views/Result.vue'
 import Chat from './views/Chat.vue'
+import History from './views/History.vue'
 import Login from './views/Login.vue'
 import { getStoredAuthUser, isAuthDisabled } from './services/auth'
 
@@ -32,6 +33,11 @@ const router = createRouter({
       path: '/chat',
       name: 'Chat',
       component: Chat
+    },
+    {
+      path: '/history',
+      name: 'History',
+      component: History
     }
   ]
 })

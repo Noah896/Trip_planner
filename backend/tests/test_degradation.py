@@ -57,6 +57,11 @@ class _GraphPlanner(MultiAgentTripPlanner):
         return self._graph
 
 
+class _HangingInitPlanner(MultiAgentTripPlanner):
+    async def _ensure_graph(self):
+        await asyncio.sleep(3600)
+
+
 class TestFallbackPlan:
     def test_placeholder_content_is_explicitly_labelled(self):
         plan = _bare_planner()._create_fallback_plan(_request())
@@ -118,6 +123,17 @@ class TestDegradedSignalling:
 
         monkeypatch.setattr(get_settings(), "plan_total_timeout", 1)
         planner = _GraphPlanner(_HangingGraph())
+
+        outcome = asyncio.run(planner.plan_trip_with_status(_request()))
+
+        assert outcome.degraded is True
+        assert "规划超时" in outcome.reason
+
+    def test_total_timeout_covers_graph_initialization(self, monkeypatch):
+        from app.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "plan_total_timeout", 1)
+        planner = _HangingInitPlanner()
 
         outcome = asyncio.run(planner.plan_trip_with_status(_request()))
 

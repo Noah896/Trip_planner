@@ -5,6 +5,8 @@ import type {
   AuthUser,
   ChatEvent,
   ChatTurn,
+  HistoryTripDetail,
+  HistoryTripListResponse,
   TripFormData,
   TripPlanResponse,
   TripProgressEvent,
@@ -157,6 +159,29 @@ export async function logoutAccount(): Promise<void> {
   }
 }
 
+export interface HistoryTripQuery {
+  city?: string
+  limit?: number
+  offset?: number
+}
+
+export async function listTripHistory(
+  query: HistoryTripQuery = {}
+): Promise<HistoryTripListResponse> {
+  const response = await apiClient.get<HistoryTripListResponse>('/api/history', {
+    params: query
+  })
+  return response.data
+}
+
+export async function getTripHistoryDetail(id: number): Promise<HistoryTripDetail> {
+  const response = await apiClient.get<HistoryTripDetail>(`/api/history/${id}`)
+  return response.data
+}
+
+export async function deleteTripHistory(id: number): Promise<void> {
+  await apiClient.delete(`/api/history/${id}`)
+}
 /**
  * 生成旅行计划
  */

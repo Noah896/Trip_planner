@@ -3,7 +3,7 @@
 import json
 from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
 from ...agents.trip_planner_agent import get_trip_planner_agent, result_message
@@ -20,6 +20,7 @@ from ...services.memory_context import (
 )
 from ...services.memory_store import get_memory_store
 from ..auth_dependencies import AuthContext, get_auth_context
+from ..quota_dependencies import model_quota_headers, reserve_model_quota
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
 
@@ -83,6 +84,7 @@ def _save_memory(
 )
 async def plan_trip(
     request: TripRequest,
+    response: Response,
     context: Optional[AuthContext] = Depends(get_auth_context),
 ):
     """
@@ -95,6 +97,8 @@ async def plan_trip(
         旅行计划响应
     """
     request = _bind_auth_user(request, context)
+    quota = reserve_model_quota(context, 1)
+    response.headers.update(model_quota_headers(quota))
 
     try:
         print(f"\n{'=' * 60}")
@@ -162,6 +166,7 @@ async def plan_trip_stream(
 ) -> StreamingResponse:
     """生成旅行计划,并以 SSE 持续推送进度。"""
     request = _bind_auth_user(request, context)
+    quota = reserve_model_quota(context, 1)
     agent = get_trip_planner_agent()
 
     planning_request, used_memory = _apply_memory(request)
@@ -202,6 +207,7 @@ async def plan_trip_stream(
             "Connection": "keep-alive",
             # 关掉反代缓冲,否则进度会被攒到最后一起发出来
             "X-Accel-Buffering": "no",
+            **model_quota_headers(quota),
         },
     )
 

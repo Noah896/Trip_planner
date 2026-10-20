@@ -431,20 +431,19 @@ class MultiAgentTripPlanner:
             print(f"偏好: {prefs}")
             print(f"{'=' * 60}\n")
 
-            graph = await self._ensure_graph()
             settings = get_settings()
 
             # LLM_TIMEOUT 只约束"两次读取之间的间隔",对流式响应不构成总时长约束,
-            # 所以这里再加一道总闸:宁可早降级,也不把客户端超时打满。
+            # 所以这里再加一道总闸。闸门必须从惰性建图开始计时:
+            # 首次调用会拉起 MCP Server、创建 Agent 并编译图,这一段同样可能卡住。
             try:
-                final_state = await asyncio.wait_for(
-                    graph.ainvoke(
+                async with asyncio.timeout(settings.plan_total_timeout):
+                    graph = await self._ensure_graph()
+                    final_state = await graph.ainvoke(
                         {"request": request, "previous_plan": previous_plan},
                         config={"recursion_limit": GRAPH_RECURSION_LIMIT},
-                    ),
-                    timeout=settings.plan_total_timeout,
-                )
-            except asyncio.TimeoutError:
+                    )
+            except TimeoutError:
                 return self._degrade(
                     request, f"规划超时(超过 {settings.plan_total_timeout} 秒,已放弃)"
                 )
@@ -489,26 +488,28 @@ class MultiAgentTripPlanner:
         """
         settings = get_settings()
         started = time.monotonic()
-        graph = await self._ensure_graph()
-
-        # 三路检索是并行的:一开始就把它们标成"进行中"。
-        # 否则前端要等第一个节点跑完(实测 7~38 秒)才收到第一条进度事件,
-        # 中间那段什么都看不见 —— 而"看得见在动"正是这条流式链路的意义。
-        for node in RETRIEVAL_NODES:
-            yield {
-                "type": "progress",
-                "stage": node,
-                "label": NODE_LABELS[node],
-                "status": "running",
-                "elapsed": round(time.monotonic() - started, 1),
-            }
 
         pending = set(RETRIEVAL_NODES)
         final_state: Dict[str, Any] = {}
         failure = ""
 
         try:
+            # 总闸从建图开始计时。首次调用需要拉起 MCP Server 并编译 LangGraph,
+            # 之前把它放在 timeout 外面,初始化卡死时 240 秒闸门根本不会触发。
             async with asyncio.timeout(settings.plan_total_timeout):
+                graph = await self._ensure_graph()
+
+                # 三路检索是并行的:建图完成后立即把它们标成"进行中"。
+                # 否则前端要等第一个节点跑完(实测 7~38 秒)才收到第一条进度事件。
+                for node in RETRIEVAL_NODES:
+                    yield {
+                        "type": "progress",
+                        "stage": node,
+                        "label": NODE_LABELS[node],
+                        "status": "running",
+                        "elapsed": round(time.monotonic() - started, 1),
+                    }
+
                 async for chunk in graph.astream(
                     {"request": request, "previous_plan": previous_plan},
                     config={"recursion_limit": GRAPH_RECURSION_LIMIT},

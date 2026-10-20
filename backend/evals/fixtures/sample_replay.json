@@ -1,0 +1,232 @@
+{
+  "description": "离线冒烟样例,不是模型质量基线",
+  "responses": {
+    "beijing-classic-3d": {
+      "success": true,
+      "degraded": false,
+      "message": "旅行计划生成成功",
+      "elapsed": 58.4,
+      "data": {
+        "city": "北京",
+        "start_date": "2026-11-01",
+        "end_date": "2026-11-03",
+        "days": [
+          {
+            "date": "2026-11-01",
+            "day_index": 0,
+            "description": "中轴线历史建筑",
+            "transportation": "公共交通",
+            "accommodation": "经济型酒店",
+            "attractions": [
+              {
+                "name": "故宫博物院",
+                "address": "景山前街4号",
+                "location": {"longitude": 116.397, "latitude": 39.918},
+                "visit_duration": 180,
+                "description": "明清皇宫"
+              },
+              {
+                "name": "景山公园",
+                "address": "景山西街44号",
+                "location": {"longitude": 116.396, "latitude": 39.925},
+                "visit_duration": 60,
+                "description": "俯瞰中轴线"
+              }
+            ],
+            "meals": []
+          },
+          {
+            "date": "2026-11-02",
+            "day_index": 1,
+            "description": "皇家园林",
+            "transportation": "公共交通",
+            "accommodation": "经济型酒店",
+            "attractions": [
+              {
+                "name": "颐和园",
+                "address": "新建宫门路19号",
+                "location": {"longitude": 116.275, "latitude": 39.999},
+                "visit_duration": 180,
+                "description": "皇家园林"
+              }
+            ],
+            "meals": []
+          },
+          {
+            "date": "2026-11-03",
+            "day_index": 2,
+            "description": "祭天建筑与城市漫步",
+            "transportation": "公共交通",
+            "accommodation": "经济型酒店",
+            "attractions": [
+              {
+                "name": "天坛公园",
+                "address": "天坛东里甲1号",
+                "location": {"longitude": 116.410, "latitude": 39.882},
+                "visit_duration": 150,
+                "description": "明清祭天建筑群"
+              }
+            ],
+            "meals": []
+          }
+        ],
+        "weather_info": [],
+        "overall_suggestions": "建议提前预约故宫,穿舒适步行鞋。",
+        "budget": {
+          "total_attractions": 180,
+          "total_hotels": 1200,
+          "total_meals": 600,
+          "total_transportation": 200,
+          "total": 2180
+        }
+      }
+    },
+    "beijing-must-visit": {
+      "success": true,
+      "degraded": false,
+      "message": "旅行计划生成成功",
+      "elapsed": 61.2,
+      "data": {
+        "city": "北京",
+        "start_date": "2026-11-07",
+        "end_date": "2026-11-09",
+        "days": [
+          {
+            "date": "2026-11-07",
+            "day_index": 0,
+            "description": "优先安排必去景点",
+            "transportation": "公共交通",
+            "accommodation": "舒适型酒店",
+            "attractions": [
+              {
+                "name": "故宫博物院",
+                "address": "景山前街4号",
+                "location": {"longitude": 116.397, "latitude": 39.918},
+                "visit_duration": 240,
+                "description": "明清皇宫"
+              }
+            ],
+            "meals": []
+          },
+          {
+            "date": "2026-11-08",
+            "day_index": 1,
+            "description": "皇家园林",
+            "transportation": "公共交通",
+            "accommodation": "舒适型酒店",
+            "attractions": [
+              {
+                "name": "颐和园",
+                "address": "新建宫门路19号",
+                "location": {"longitude": 116.275, "latitude": 39.999},
+                "visit_duration": 180,
+                "description": "皇家园林"
+              }
+            ],
+            "meals": []
+          },
+          {
+            "date": "2026-11-09",
+            "day_index": 2,
+            "description": "城市文化",
+            "transportation": "公共交通",
+            "accommodation": "舒适型酒店",
+            "attractions": [
+              {
+                "name": "天坛公园",
+                "address": "天坛东里甲1号",
+                "location": {"longitude": 116.410, "latitude": 39.882},
+                "visit_duration": 150,
+                "description": "祭天建筑群"
+              }
+            ],
+            "meals": []
+          }
+        ],
+        "weather_info": [],
+        "overall_suggestions": "故宫安排在第一日,建议提前预约。",
+        "budget": {
+          "total_attractions": 200,
+          "total_hotels": 1800,
+          "total_meals": 750,
+          "total_transportation": 220,
+          "total": 2970
+        }
+      }
+    },
+    "shanghai-family-3d": {
+      "success": true,
+      "degraded": true,
+      "message": "AI 规划未完成,已返回占位行程",
+      "reason": "模拟降级,用于验证失败报告",
+      "elapsed": 12.0,
+      "data": {
+        "city": "上海",
+        "start_date": "2026-11-14",
+        "end_date": "2026-11-16",
+        "days": [
+          {
+            "date": "2026-11-14",
+            "day_index": 0,
+            "description": "占位行程",
+            "transportation": "公共交通",
+            "accommodation": "舒适型酒店",
+            "attractions": [
+              {
+                "name": "上海景点1",
+                "address": "待补充",
+                "location": {"longitude": 121.47, "latitude": 31.23},
+                "visit_duration": 120,
+                "description": "占位内容"
+              }
+            ],
+            "meals": []
+          },
+          {
+            "date": "2026-11-15",
+            "day_index": 1,
+            "description": "占位行程",
+            "transportation": "公共交通",
+            "accommodation": "舒适型酒店",
+            "attractions": [
+              {
+                "name": "上海景点2",
+                "address": "待补充",
+                "location": {"longitude": 121.48, "latitude": 31.24},
+                "visit_duration": 120,
+                "description": "占位内容"
+              }
+            ],
+            "meals": []
+          },
+          {
+            "date": "2026-11-16",
+            "day_index": 2,
+            "description": "占位行程",
+            "transportation": "公共交通",
+            "accommodation": "舒适型酒店",
+            "attractions": [
+              {
+                "name": "上海景点3",
+                "address": "待补充",
+                "location": {"longitude": 121.49, "latitude": 31.25},
+                "visit_duration": 120,
+                "description": "占位内容"
+              }
+            ],
+            "meals": []
+          }
+        ],
+        "weather_info": [],
+        "overall_suggestions": "这是占位行程,请稍后重试。",
+        "budget": {
+          "total_attractions": 0,
+          "total_hotels": 0,
+          "total_meals": 0,
+          "total_transportation": 0,
+          "total": 0
+        }
+      }
+    }
+  }
+}

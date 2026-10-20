@@ -1,10 +1,11 @@
 """FastAPI Bearer 鉴权依赖。"""
 
+import hmac
 from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
 from ..config import get_settings
 from ..services import auth_service
@@ -12,6 +13,7 @@ from ..services.auth_service import AuthTokenError, AuthUser
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
+admin_key_scheme = APIKeyHeader(name="X-Admin-Key", auto_error=False)
 
 
 @dataclass(frozen=True)
@@ -55,3 +57,21 @@ def require_path_user(requested_user_id: str, context: Optional[AuthContext]) ->
             detail="无权访问其他用户的记忆",
         )
     return context.user.user_id
+
+
+def require_admin_key(
+    provided_key: Optional[str] = Depends(admin_key_scheme),
+) -> bool:
+    """校验自托管账号管理密钥;未配置时关闭管理接口。"""
+    expected = (get_settings().auth_admin_key or "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="账号管理接口未启用",
+        )
+    if not provided_key or not hmac.compare_digest(expected, provided_key.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="管理员密钥无效",
+        )
+    return True

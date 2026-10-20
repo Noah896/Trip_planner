@@ -1,0 +1,388 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "beijing-classic-3d",
+      "category": "classic",
+      "request": {
+        "city": "北京",
+        "start_date": "2026-11-01",
+        "end_date": "2026-11-03",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "经济型酒店",
+        "preferences": ["历史文化"],
+        "must_visit": [],
+        "free_text_input": ""
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 4,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "beijing-must-visit",
+      "category": "must_visit",
+      "request": {
+        "city": "北京",
+        "start_date": "2026-11-07",
+        "end_date": "2026-11-09",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "舒适型酒店",
+        "preferences": ["历史文化"],
+        "must_visit": ["故宫博物院"],
+        "free_text_input": "故宫必须安排进行程"
+      },
+      "expect": {
+        "must_visit": ["故宫博物院"],
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "shanghai-family-3d",
+      "category": "family",
+      "request": {
+        "city": "上海",
+        "start_date": "2026-11-14",
+        "end_date": "2026-11-16",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "舒适型酒店",
+        "preferences": ["亲子", "休闲"],
+        "must_visit": [],
+        "free_text_input": "带一个六岁小孩,节奏不要太赶"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "chengdu-food-4d",
+      "category": "food",
+      "request": {
+        "city": "成都",
+        "start_date": "2026-11-20",
+        "end_date": "2026-11-23",
+        "travel_days": 4,
+        "transportation": "公共交通",
+        "accommodation": "民宿",
+        "preferences": ["美食", "休闲"],
+        "must_visit": [],
+        "free_text_input": "想吃本地菜,不吃辣"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 4,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "xian-terracotta-3d",
+      "category": "must_visit",
+      "request": {
+        "city": "西安",
+        "start_date": "2026-11-27",
+        "end_date": "2026-11-29",
+        "travel_days": 3,
+        "transportation": "混合",
+        "accommodation": "经济型酒店",
+        "preferences": ["历史文化"],
+        "must_visit": ["秦始皇帝陵博物院"],
+        "free_text_input": "兵马俑是重点"
+      },
+      "expect": {
+        "must_visit": ["秦始皇帝陵博物院", "兵马俑"],
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "hangzhou-nature-3d",
+      "category": "nature",
+      "request": {
+        "city": "杭州",
+        "start_date": "2026-12-04",
+        "end_date": "2026-12-06",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "舒适型酒店",
+        "preferences": ["自然风光", "休闲"],
+        "must_visit": [],
+        "free_text_input": "想慢逛和拍照"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "suzhou-gardens-2d",
+      "category": "classic",
+      "request": {
+        "city": "苏州",
+        "start_date": "2026-12-11",
+        "end_date": "2026-12-12",
+        "travel_days": 2,
+        "transportation": "公共交通",
+        "accommodation": "民宿",
+        "preferences": ["历史文化"],
+        "must_visit": [],
+        "free_text_input": "想看园林"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 2,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "guangzhou-food-3d",
+      "category": "food",
+      "request": {
+        "city": "广州",
+        "start_date": "2026-12-18",
+        "end_date": "2026-12-20",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "舒适型酒店",
+        "preferences": ["美食"],
+        "must_visit": [],
+        "free_text_input": "多安排早茶和本地小吃"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "shenzhen-family-3d",
+      "category": "family",
+      "request": {
+        "city": "深圳",
+        "start_date": "2026-12-24",
+        "end_date": "2026-12-26",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "舒适型酒店",
+        "preferences": ["亲子", "休闲"],
+        "must_visit": [],
+        "free_text_input": "带老人和小孩,少走路"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "xiamen-relaxed-2d",
+      "category": "nature",
+      "request": {
+        "city": "厦门",
+        "start_date": "2027-01-01",
+        "end_date": "2027-01-02",
+        "travel_days": 2,
+        "transportation": "步行",
+        "accommodation": "民宿",
+        "preferences": ["休闲", "美食"],
+        "must_visit": [],
+        "free_text_input": "不想太累"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 2,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "qingdao-coast-3d",
+      "category": "nature",
+      "request": {
+        "city": "青岛",
+        "start_date": "2027-01-08",
+        "end_date": "2027-01-10",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "经济型酒店",
+        "preferences": ["自然风光", "美食"],
+        "must_visit": [],
+        "free_text_input": "想看海和吃海鲜"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "luoyang-longmen-3d",
+      "category": "must_visit",
+      "request": {
+        "city": "洛阳",
+        "start_date": "2027-01-15",
+        "end_date": "2027-01-17",
+        "travel_days": 3,
+        "transportation": "混合",
+        "accommodation": "经济型酒店",
+        "preferences": ["历史文化"],
+        "must_visit": ["龙门石窟"],
+        "free_text_input": ""
+      },
+      "expect": {
+        "must_visit": ["龙门石窟"],
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "datong-yungang-3d",
+      "category": "must_visit",
+      "request": {
+        "city": "大同",
+        "start_date": "2027-01-22",
+        "end_date": "2027-01-24",
+        "travel_days": 3,
+        "transportation": "混合",
+        "accommodation": "经济型酒店",
+        "preferences": ["历史文化"],
+        "must_visit": ["云冈石窟"],
+        "free_text_input": ""
+      },
+      "expect": {
+        "must_visit": ["云冈石窟"],
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "dunhuang-mogao-4d",
+      "category": "culture",
+      "request": {
+        "city": "敦煌",
+        "start_date": "2027-02-05",
+        "end_date": "2027-02-08",
+        "travel_days": 4,
+        "transportation": "混合",
+        "accommodation": "舒适型酒店",
+        "preferences": ["历史文化", "自然风光"],
+        "must_visit": ["莫高窟"],
+        "free_text_input": "想兼顾石窟和沙漠景观"
+      },
+      "expect": {
+        "must_visit": ["莫高窟"],
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 4,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "chongqing-city-3d",
+      "category": "city",
+      "request": {
+        "city": "重庆",
+        "start_date": "2027-02-12",
+        "end_date": "2027-02-14",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "舒适型酒店",
+        "preferences": ["美食", "购物"],
+        "must_visit": [],
+        "free_text_input": "想看夜景"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "nanjing-history-3d",
+      "category": "classic",
+      "request": {
+        "city": "南京",
+        "start_date": "2027-02-19",
+        "end_date": "2027-02-21",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "经济型酒店",
+        "preferences": ["历史文化"],
+        "must_visit": [],
+        "free_text_input": ""
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "wuhan-mixed-2d",
+      "category": "city",
+      "request": {
+        "city": "武汉",
+        "start_date": "2027-02-26",
+        "end_date": "2027-02-27",
+        "travel_days": 2,
+        "transportation": "公共交通",
+        "accommodation": "经济型酒店",
+        "preferences": ["历史文化", "美食"],
+        "must_visit": [],
+        "free_text_input": "希望兼顾博物馆和江边散步"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 2,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    },
+    {
+      "id": "changsha-food-3d",
+      "category": "food",
+      "request": {
+        "city": "长沙",
+        "start_date": "2027-03-05",
+        "end_date": "2027-03-07",
+        "travel_days": 3,
+        "transportation": "公共交通",
+        "accommodation": "经济型酒店",
+        "preferences": ["美食", "休闲"],
+        "must_visit": [],
+        "free_text_input": "想多吃本地小吃"
+      },
+      "expect": {
+        "min_attractions_per_day": 1,
+        "min_unique_attractions": 3,
+        "max_latency_seconds": 180,
+        "require_budget": true
+      }
+    }
+  ]
+}
