@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from datetime import date
 
+from ..utils.city_normalization import normalize_city_name
+
 
 # ============ 模型输出的容错解析 ============
 # 背景(2026-10-16 实测):Qwen3.5 在结构化输出里会把**嵌套对象写成 JSON 字符串**,
@@ -78,6 +80,15 @@ class TripRequest(BaseModel):
         max_length=128,
     )
 
+    @field_validator("city")
+    @classmethod
+    def _normalize_city(cls, value: str) -> str:
+        """用户常输入“省份 + 城市”;高德需要城市名本身。"""
+        city = normalize_city_name(value)
+        if not city:
+            raise ValueError("目的地城市不能为空")
+        return city
+
     @model_validator(mode="after")
     def _validate_date_range(self) -> "TripRequest":
         """校验日期区间合法,并与 travel_days 保持一致。
@@ -120,6 +131,11 @@ class POISearchRequest(BaseModel):
     city: str = Field(..., description="城市", examples=["北京"])
     citylimit: bool = Field(default=True, description="是否限制在城市范围内")
 
+    @field_validator("city")
+    @classmethod
+    def _normalize_city(cls, value: str) -> str:
+        return normalize_city_name(value)
+
 
 class RouteRequest(BaseModel):
     """路线规划请求"""
@@ -128,6 +144,13 @@ class RouteRequest(BaseModel):
     origin_city: Optional[str] = Field(default=None, description="起点城市")
     destination_city: Optional[str] = Field(default=None, description="终点城市")
     route_type: str = Field(default="walking", description="路线类型: walking/driving/transit")
+
+    @field_validator("origin_city", "destination_city")
+    @classmethod
+    def _normalize_optional_city(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_city_name(value) or None
 
 
 # ============ 响应模型 ============

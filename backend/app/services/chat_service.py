@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, field_validator
 from ..agents.trip_planner_agent import get_trip_planner_agent
 from ..config import get_settings
 from ..models.schemas import ChatMessage, ChatRequest, TripPlan, TripRequest
+from ..utils.city_normalization import normalize_city_name
 from .llm_service import get_llm
 from .memory_context import (
     HistoryRecall,
@@ -110,6 +111,13 @@ class ChatDecision(BaseModel):
             return None
         text = str(value).strip()
         return None if text.casefold() in _EMPTY_SLOT_VALUES else text
+
+    @field_validator("city")
+    @classmethod
+    def _normalize_city(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return normalize_city_name(value) or None
 
     @field_validator("free_text_input", mode="before")
     @classmethod

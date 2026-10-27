@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..models.schemas import Location, POIInfo, WeatherInfo
+from ..utils.city_normalization import normalize_city_name
 from ..utils.json_utils import parse_mcp_payload
 from .amap_mcp import extract_text, find_tool, get_amap_tools
 
@@ -230,6 +231,7 @@ class AmapService:
         Returns:
             POI 信息列表
         """
+        city = normalize_city_name(city)
         print(f"🔍 POI 搜索: keywords={keywords}, city={city}")
         data = await self._call(
             TOOL_TEXT_SEARCH,
@@ -250,6 +252,7 @@ class AmapService:
         Returns:
             天气信息列表
         """
+        city = normalize_city_name(city)
         print(f"🌤️  天气查询: city={city}")
         data = await self._call(TOOL_WEATHER, {"city": city})
         return self._parse_weather(data)
@@ -281,9 +284,9 @@ class AmapService:
             "destination_address": destination_address,
         }
         if origin_city:
-            arguments["origin_city"] = origin_city
+            arguments["origin_city"] = normalize_city_name(origin_city)
         if destination_city:
-            arguments["destination_city"] = destination_city
+            arguments["destination_city"] = normalize_city_name(destination_city)
 
         print(f"🗺️  路线规划: {route_type} {origin_address} -> {destination_address}")
         data = await self._call(tool_name, arguments)
@@ -303,7 +306,7 @@ class AmapService:
         """
         arguments: Dict[str, Any] = {"address": address}
         if city:
-            arguments["city"] = city
+            arguments["city"] = normalize_city_name(city)
 
         print(f"📍 地理编码: {address}")
         data = await self._call(TOOL_GEO, arguments)
