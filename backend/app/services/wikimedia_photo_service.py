@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import requests
 
@@ -22,6 +25,11 @@ _NO_MATCH_TTL_SECONDS = 10 * 60
 _FAILURE_TTL_SECONDS = 60
 _FAILURE_BACKOFF_SECONDS = 60
 _MISSING = object()
+_AUTO_CURL = object()
+
+
+class PhotoLookupError(RuntimeError):
+    """图片搜索的网络或响应错误。"""
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,7 @@ class AttractionPhoto:
     provider: str
     source_url: str
     title: str
+    scope: str
 
 
 class WikimediaPhotoService:
@@ -40,10 +49,16 @@ class WikimediaPhotoService:
     def __init__(
         self,
         *,
-        timeout: Tuple[float, float] = (3.0, 8.0),
+        timeout: float = 10.0,
+        curl_path: Optional[str] | object = _AUTO_CURL,
     ):
         self.timeout = timeout
         self.base_url = "https://commons.wikimedia.org/w/api.php"
+        self.curl_path = (
+            shutil.which("curl")
+            if curl_path is _AUTO_CURL
+            else curl_path
+        )
         self._lock = threading.Lock()
         self._cache: Dict[str, Tuple[float, Optional[AttractionPhoto]]] = {}
         self._unavailable_until = 0.0
@@ -69,13 +84,60 @@ class WikimediaPhotoService:
                 return None
 
         try:
-            photo = self._search(clean_name, clean_city)
-        except (requests.RequestException, TypeError, ValueError) as exc:
+            photo = self._search(
+                " ".join(part for part in (clean_name, clean_city) if part)
+            )
+        except (
+            PhotoLookupError,
+            requests.RequestException,
+            TypeError,
+            ValueError,
+        ) as exc:
             print(f"⚠️  Wikimedia 图片搜索失败: {type(exc).__name__}: {exc}")
             with self._lock:
                 self._unavailable_until = time.monotonic() + _FAILURE_BACKOFF_SECONDS
             self._set_cache(cache_key, None, ttl=_FAILURE_TTL_SECONDS)
             return None
+
+        if photo is None and clean_city:
+            city_key = f"__city__|{clean_city}".casefold()
+            city_photo = self._get_cache(city_key)
+            if city_photo is _MISSING:
+                try:
+                    city_photo = self._search(
+                        f"{clean_city} 风景",
+                        variant_seed=clean_name,
+                    )
+                    if city_photo is not None:
+                        city_photo = AttractionPhoto(
+                            url=city_photo.url,
+                            provider=city_photo.provider,
+                            source_url=city_photo.source_url,
+                            title=city_photo.title,
+                            scope="city",
+                        )
+                except (
+                    PhotoLookupError,
+                    requests.RequestException,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    print(
+                        "⚠️  Wikimedia 城市风光搜索失败: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    city_photo = None
+                self._set_cache(
+                    city_key,
+                    city_photo,
+                    ttl=(
+                        _SUCCESS_TTL_SECONDS
+                        if city_photo
+                        else _NO_MATCH_TTL_SECONDS
+                    ),
+                )
+            if city_photo is not _MISSING:
+                photo = city_photo
 
         self._set_cache(
             cache_key,
@@ -86,13 +148,12 @@ class WikimediaPhotoService:
 
     def _search(
         self,
-        name: str,
-        city: str,
+        query: str,
+        *,
+        variant_seed: str = "",
     ) -> Optional[AttractionPhoto]:
-        query = " ".join(part for part in (name, city) if part)
-        response = requests.get(
-            self.base_url,
-            params={
+        payload = self._fetch_json(
+            {
                 "action": "query",
                 "generator": "search",
                 "gsrsearch": query,
@@ -103,17 +164,8 @@ class WikimediaPhotoService:
                 "iiurlwidth": 800,
                 "format": "json",
                 "origin": "*",
-            },
-            headers={
-                "User-Agent": (
-                    "helloagents-trip-planner/1.0 "
-                    "(local development; attraction photo lookup)"
-                )
-            },
-            timeout=self.timeout,
+            }
         )
-        response.raise_for_status()
-        payload = response.json()
         pages = (payload.get("query") or {}).get("pages") or {}
         if not isinstance(pages, dict):
             return None
@@ -122,6 +174,7 @@ class WikimediaPhotoService:
             (page for page in pages.values() if isinstance(page, dict)),
             key=self._page_index,
         )
+        candidates: List[AttractionPhoto] = []
         for page in ordered:
             image_info = page.get("imageinfo") or []
             if not image_info or not isinstance(image_info[0], dict):
@@ -137,13 +190,72 @@ class WikimediaPhotoService:
                 "https://commons.wikimedia.org/"
             ):
                 source_url = ""
-            return AttractionPhoto(
-                url=image_url,
-                provider="Wikimedia Commons",
-                source_url=source_url,
-                title=str(page.get("title") or "").removeprefix("File:"),
+            candidates.append(
+                AttractionPhoto(
+                    url=image_url,
+                    provider="Wikimedia Commons",
+                    source_url=source_url,
+                    title=str(page.get("title") or "").removeprefix("File:"),
+                    scope="attraction",
+                )
             )
-        return None
+        if not candidates:
+            return None
+        if not variant_seed:
+            return candidates[0]
+        index = sum(ord(char) for char in variant_seed) % len(candidates)
+        return candidates[index]
+
+    def _fetch_json(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """优先用系统 curl(Windows Schannel),其它平台回退 requests。"""
+        if self.curl_path:
+            url = f"{self.base_url}?{urlencode(params)}"
+            result = subprocess.run(
+                [
+                    str(self.curl_path),
+                    "--silent",
+                    "--show-error",
+                    "--location",
+                    "--connect-timeout",
+                    "5",
+                    "--max-time",
+                    "12",
+                    "--retry",
+                    "1",
+                    "--user-agent",
+                    (
+                        "helloagents-trip-planner/1.0 "
+                        "(local development; attraction photo lookup)"
+                    ),
+                    url,
+                ],
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+            if result.returncode != 0:
+                message = result.stderr.decode("utf-8", errors="replace").strip()
+                raise PhotoLookupError(message or f"curl 退出码 {result.returncode}")
+            try:
+                payload = json.loads(result.stdout.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise PhotoLookupError("Wikimedia 返回了非法 JSON") from exc
+            return payload if isinstance(payload, dict) else {}
+
+        response = requests.get(
+            self.base_url,
+            params=params,
+            headers={
+                "User-Agent": (
+                    "helloagents-trip-planner/1.0 "
+                    "(local development; attraction photo lookup)"
+                )
+            },
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def _page_index(page: Dict[str, Any]) -> int:

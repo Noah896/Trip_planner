@@ -230,7 +230,9 @@
                           rel="noopener noreferrer"
                           @click.stop
                         >
-                          图源 Wikimedia Commons
+                          {{ attractionPhotoMeta[item.name].scope === 'city'
+                            ? '图源 Wikimedia Commons · 城市风光'
+                            : '图源 Wikimedia Commons' }}
                         </a>
                         <div class="attraction-badge">
                           <span class="badge-number">{{ index + 1 }}</span>
@@ -376,6 +378,7 @@ interface AttractionPhotoMeta {
   provider: string
   source_url: string
   title: string
+  scope: string
 }
 
 const attractionPhotos = ref<Record<string, string>>({})
@@ -516,7 +519,7 @@ const loadAttractionPhotos = async () => {
 
   await Promise.allSettled(names.map(async name => {
     const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 12000)
+    const timeout = window.setTimeout(() => controller.abort(), 25000)
     try {
       const response = await fetch(
         `${baseUrl}/api/poi/photo?name=${encodeURIComponent(name)}&city=${encodeURIComponent(city)}`,
@@ -530,7 +533,8 @@ const loadAttractionPhotos = async () => {
       attractionPhotoMeta.value[name] = {
         provider: data.data.provider || '',
         source_url: data.data.source_url || '',
-        title: data.data.title || ''
+        title: data.data.title || '',
+        scope: data.data.scope || 'attraction'
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {

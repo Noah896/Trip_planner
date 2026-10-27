@@ -25,6 +25,7 @@ class _Response:
 
 def test_wikimedia_service_rejects_documents_and_uses_bitmap(monkeypatch):
     service = WikimediaPhotoService()
+    service.curl_path = None
     payload = {
         "query": {
             "pages": {
@@ -73,6 +74,7 @@ def test_wikimedia_service_rejects_documents_and_uses_bitmap(monkeypatch):
 
 def test_wikimedia_service_caches_no_match(monkeypatch):
     service = WikimediaPhotoService()
+    service.curl_path = None
     calls = []
 
     def _get(*args, **kwargs):
@@ -86,7 +88,51 @@ def test_wikimedia_service_caches_no_match(monkeypatch):
 
     assert service.get_photo("不存在的地方", "郴州") is None
     assert service.get_photo("不存在的地方", "郴州") is None
-    assert len(calls) == 1
+    # 第一次查景点和城市风光各一次;第二次两级缓存都命中。
+    assert len(calls) == 2
+
+
+def test_wikimedia_service_falls_back_to_city_scenery(monkeypatch):
+    service = WikimediaPhotoService()
+    service.curl_path = None
+    responses = [
+        _Response({"query": {"pages": {}}}),
+        _Response(
+            {
+                "query": {
+                    "pages": {
+                        "3": {
+                            "index": 1,
+                            "title": "File:Chenzhou scenery.jpg",
+                            "imageinfo": [
+                                {
+                                    "mime": "image/jpeg",
+                                    "thumburl": (
+                                        "https://thumb.wikimedia.org/"
+                                        "chenzhou-scenery.jpg"
+                                    ),
+                                    "descriptionurl": (
+                                        "https://commons.wikimedia.org/wiki/"
+                                        "File:Chenzhou_scenery.jpg"
+                                    ),
+                                }
+                            ],
+                        }
+                    }
+                }
+            }
+        ),
+    ]
+    monkeypatch.setattr(
+        "app.services.wikimedia_photo_service.requests.get",
+        lambda *args, **kwargs: responses.pop(0),
+    )
+
+    photo = service.get_photo("五岭阁", "郴州")
+
+    assert photo is not None
+    assert photo.scope == "city"
+    assert photo.title == "Chenzhou scenery.jpg"
 
 
 def test_photo_route_returns_metadata(monkeypatch):
@@ -97,6 +143,7 @@ def test_photo_route_returns_metadata(monkeypatch):
                 provider="Wikimedia Commons",
                 source_url="https://commons.wikimedia.org/wiki/File:Test.jpg",
                 title="Test.jpg",
+                scope="attraction",
             )
 
     monkeypatch.setattr(
@@ -115,3 +162,4 @@ def test_photo_route_returns_metadata(monkeypatch):
     body = response.json()
     assert body["data"]["photo_url"] == "https://upload.wikimedia.org/test.jpg"
     assert body["data"]["provider"] == "Wikimedia Commons"
+    assert body["data"]["scope"] == "attraction"
