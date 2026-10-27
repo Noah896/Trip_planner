@@ -1,11 +1,19 @@
-# 依赖已按当前验证通过的版本锁定(2026-10-09,Python 3.13)。
+# 依赖已按当前验证通过的版本锁定(2026-10-20,Python 3.13)。
 # 升级依赖时请同步跑一遍 `pytest`(见 backend/tests)和一次真实 /api/trip/plan。
 
 # LangChain 框架
 langchain==1.4.2
 langchain-openai==1.6.6
+langchain-huggingface==1.2.3
+langchain-community==0.4.2
+langchain-text-splitters==1.1.3
 langgraph==1.2.12
 langchain-mcp-adapters==0.3.2
+
+# C8 同款 RAG 检索栈
+faiss-cpu==1.15.1
+rank-bm25==0.2.2
+sentence-transformers==5.7.0
 
 # FastAPI和相关依赖
 fastapi==0.141.1

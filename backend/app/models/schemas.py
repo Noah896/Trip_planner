@@ -271,6 +271,19 @@ class UsedMemoryResponse(BaseModel):
     source_text: str = Field(default="", description="原始出处文本")
 
 
+class KnowledgeSource(BaseModel):
+    """一条实际进入规划提示词的知识来源。"""
+
+    id: str = Field(..., description="本轮证据编号,例如 K1")
+    chunk_id: str = Field(..., description="稳定切片 ID")
+    title: str = Field(..., description="文档标题")
+    section: str = Field(default="", description="章节")
+    publisher: str = Field(default="", description="发布方")
+    source_url: str = Field(default="", description="原始来源 URL")
+    verified_at: str = Field(default="", description="最后核验日期")
+    category: str = Field(default="", description="知识分类")
+
+
 class HistoryUsageResponse(BaseModel):
     """本轮规划引用的历史行程摘要。"""
 
@@ -340,6 +353,19 @@ class TripPlanResponse(BaseModel):
     )
     used_history: Optional[HistoryUsageResponse] = Field(
         default=None, description="本轮规划引用的历史行程"
+    )
+    knowledge_used: bool = Field(
+        default=False, description="本轮规划是否实际注入了知识库证据"
+    )
+    knowledge_degraded: bool = Field(
+        default=False,
+        description="知识检索是否超时、失败或无命中;不影响行程本身的降级状态",
+    )
+    knowledge_status: str = Field(
+        default="disabled", description="disabled/ok/no_match/timeout/error"
+    )
+    knowledge_sources: List[KnowledgeSource] = Field(
+        default=[], description="服务层生成的真实知识来源"
     )
 
 

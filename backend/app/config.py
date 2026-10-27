@@ -67,6 +67,27 @@ class Settings(BaseSettings):
     # 所以必须另有一个总闸:超时直接降级,而不是把客户端超时打满。
     plan_total_timeout: int = 240
 
+    # 公共旅行知识 RAG。RAG 是第四路非硬依赖检索;失败只标记 knowledge_degraded,
+    # 不会把整份行程判定为 degraded。
+    rag_enabled: bool = True
+    rag_index_path: str = "data/trip_knowledge_faiss"
+    rag_seed_path: str = "knowledge/seed_documents.jsonl"
+    rag_auto_bootstrap: bool = True
+    rag_embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    rag_model_root: str = ""
+    rag_device: str = "cpu"
+    rag_top_k: int = 3
+    rag_vector_k: int = 5
+    rag_bm25_k: int = 5
+    rag_rrf_k: int = 60
+    rag_timeout_seconds: float = 15.0
+    rag_max_context_chars: int = 2200
+    # 阈值由 38 题中文检索基线校准:
+    # 高语义分直接接纳;中等语义分仅在中文 BM25 有足够字词证据时接纳。
+    rag_min_vector_relevance: float = 0.62
+    rag_lexical_rescue_min_vector_relevance: float = 0.55
+    rag_lexical_rescue_min_bm25_score: float = 6.0
+
     # 服务端会话记忆(SQLite)。相对路径以进程工作目录为基准。
     memory_db_path: str = "data/trip_memory.sqlite3"
     # 会话记忆保留天数;过期记录会在读写时顺带清理。

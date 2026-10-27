@@ -23,3 +23,5 @@ def _disable_auth_by_default(monkeypatch):
     monkeypatch.setattr(settings, "auth_enabled", False)
     # 没有登录用户时不预占模型配额,避免旧用例写入真实 data/ 数据库。
     monkeypatch.setattr(settings, "model_quota_enabled", False)
+    # RAG 用例会显式开启并注入临时索引;其它测试默认不读写 data/ 下的知识库。
+    monkeypatch.setattr(settings, "rag_enabled", False)

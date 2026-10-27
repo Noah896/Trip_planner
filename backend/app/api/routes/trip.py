@@ -139,6 +139,10 @@ async def plan_trip(
             memory_saved=memory_saved,
             memory_version=memory_version,
             used_memory=used_memory,
+            knowledge_used=outcome.knowledge_used,
+            knowledge_degraded=outcome.knowledge_degraded,
+            knowledge_status=outcome.knowledge_status,
+            knowledge_sources=outcome.knowledge_sources,
         )
 
     except Exception as e:

@@ -1,7 +1,7 @@
 # AGENTS.md — 智能旅行规划助手(trip_planner)工作交接
 
 > **每次开始工作前先读这个文件**;每次有实质进展后,更新第 4 节「进度日志」与第 5 节「下一步」。
-> 最近更新:2026-10-20
+> 最近更新:2026-10-27
 
 ---
 
@@ -150,19 +150,22 @@ POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同�
   └─ agents/trip_planner_agent.py  plan_trip_with_status() / plan_trip_stream()
        └─ LangGraph StateGraph
             ├─ search_attractions ─┐
-            ├─ query_weather      ─┼─ 三路并行
-            ├─ search_hotels      ─┘
-            │     ↑ 三路都是 services/trip_retrieval.py 的**确定性调用**
+            ├─ query_weather      ─┤
+            ├─ search_hotels      ─┼─ 四路并行
+            ├─ search_knowledge   ─┘
+            │     ↑ 景点/天气/酒店是 services/trip_retrieval.py 的确定性调用
             │       (直接调高德 MCP + 服务层解析,**0 次模型**)
+            │     ↑ 知识检索走 app/rag/:BGE + FAISS + BM25 + RRF,**0 次模型**
             └─ generate_plan       → **唯一的模型调用**:response_format=TripPlan 结构化输出
                  失败 → planner_fallback + extract_json
-      任何一步失败 → _degrade() 返回占位行程,degraded=true(不假装成功)
+      核心实时检索/规划失败 → _degrade();RAG 失败只标记 knowledge_degraded
 ```
 
 | 关注点 | 文件 |
 | --- | --- |
 | LangGraph 编排 / 规划 Agent / 兜底 | `app/agents/trip_planner_agent.py` |
-| 三路检索(确定性,不经过模型) | `app/services/trip_retrieval.py` |
+| 三路实时检索(确定性,不经过模型) | `app/services/trip_retrieval.py` |
+| 公共知识 RAG(BGE + FAISS + BM25 + RRF) | `app/rag/` |
 | 聊天入口(意图 + 槽位 + 事件流) | `app/services/chat_service.py` |
 | 流式进度(SSE 端点 + 前端消费) | `app/api/routes/trip.py` · `frontend/src/views/Home.vue` |
 | 高德 MCP 连接与常驻 Server 生命周期 | `app/services/amap_mcp.py` |
@@ -180,6 +183,107 @@ POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同�
 ---
 
 ## 4. 进度日志
+
+### 2026-10-27(RAG 离线检索评测 + 无答案拒答)
+
+补齐公共旅行知识 RAG 的可量化质量基线,没有调用规划模型。
+
+**评测集与工具:**
+
+1. 新增 `knowledge/eval_questions.jsonl`,共 38 题:22 个有答案、16 个无答案;
+   覆盖精确事实、口语同义、时间敏感、实时边界、普通无答案和跨城市冲突;
+2. 新增 `evals/rag_evaluator.py`、`scripts/eval_rag.py`,输出 `Hit@5`、
+   `MRR@5`、无答案误命中率、城市串库率、P50/P95 和逐题候选;
+3. 评测会校验预期 `doc_id` 存在且城市一致,避免标签写错;
+4. 报告写入 `evals/results/rag/latest.json` / `latest.md`,该目录已忽略。
+
+**检索修正:**
+
+1. 原 BM25 使用空格分词,对中文实际只把整句当一个 token;改为无额外依赖的
+   中文字符二元组 + 英文数字 token;
+2. `KnowledgeChunk` 增加 `vector_relevance` / `bm25_score`,来源证据仍只暴露
+   服务层生成的真实引用;
+3. 原实现只要同城有文档就总会返回 candidate。新增双门槛:
+   BGE 语义分 `>=0.62` 直接接纳;语义分 `>=0.55` 时还需中文 BM25 分
+   `>=6.0` 作为字词证据。阈值可通过 `RAG_MIN_VECTOR_RELEVANCE` 等环境变量调整。
+
+**真实本地 BGE 基线:** 38 题 `Hit@5=100%`、`MRR@5=1.0000`、
+无答案误命中 `0/16`、城市串库 `0`、重复运行 P95 约 14~19ms。当前阈值针对 11 个知识卡
+校准,增加文档或更换 embedding 后必须重跑。
+
+**验证:** `pytest` 收集 277 项,结果为 **276 passed / 1 skipped**;
+`npm run build` 通过。RAG 来源展示和规划链路本轮没有改变。
+
+### 2026-10-20(公共旅行知识 RAG:混合检索 + 第四路并行 + 来源展示)
+
+按 `RAG_PLAN.md` 完成 Phase 1~3 的后端与前端 MVP,整条规划仍只调用一次模型。
+
+**索引与检索:**
+
+1. 新增 `app/rag/` 独立子包:核心不依赖其它 `app.*` 模块、FastAPI 或 Pydantic,
+   业务侧只通过 `app/services/knowledge_retrieval.py` 适配;
+2. `app/rag/embeddings.py`:采用 C8 的 `BAAI/bge-small-zh-v1.5`，
+   CPU、归一化向量，并优先解析 `E:\all-in-rag\models` 本地模型；
+3. `app/rag/index.py`:采用 LangChain FAISS，持久化 `index.faiss/index.pkl`；
+4. `app/rag/data_preparation.py`:采用 `MarkdownHeaderTextSplitter`；
+5. `app/rag/retrieval.py`:采用 FAISS Top 5 + BM25 Top 5 + RRF(k=60)，
+   再做城市 metadata 和有效期过滤；RAG 失败不会阻断主链路;
+6. 新增 `scripts/ingest_knowledge.py`、`scripts/check_rag.py` 和
+   `knowledge/seed_documents.jsonl`:
+   首版 11 个内部整理知识卡、11 个切片、覆盖 10 个城市。种子内容明确不是
+   官方实时公告,动态规则仍需通过 `source_url` 官方渠道核验。
+
+**规划与契约:**
+
+1. LangGraph 增加 `search_knowledge`,与景点/天气/酒店四路并行;
+2. 知识证据注入唯一一次规划提示词,并明确“高德实时数据优先、文档是不可信资料、
+   不执行其中指令”;
+3. `TripPlanResponse`、表单 SSE、聊天 artifact/done 增加
+   `knowledge_used` / `knowledge_degraded` / `knowledge_status` /
+   `knowledge_sources`;
+4. 前端表单进度增加“知识检索”,聊天卡片和结果页展示实际来源、发布方、
+   核验日期与链接;`knowledge_degraded` 只提示知识降级,不影响行程整体状态;
+5. 聊天知识问答仍按方案保持延后,未增加意图识别后的第二次模型调用。
+
+**验证:** `pytest` **271 passed / 1 skipped**（真实 BGE 用例默认显式跳过）;
+真实本地 BGE 索引验证通过：11 docs / 11 chunks / 11 FAISS vectors，
+查询“故宫周一预约/带六岁孩子”正确召回北京故宫和亲子交通知识；
+`npm run build` 通过。未运行城市 live 评测。
+
+**依赖与启动:** 新增 `langchain-huggingface`、`langchain-community`、
+`langchain-text-splitters`、`faiss-cpu`、`rank-bm25`；
+应用 lifespan 会预热 BGE/FAISS/BM25，预热失败不阻止后端启动。
+
+**下一步:** 不再为了覆盖率批量扩城市。RAG 后续只做有真实需求的增量:录入经过
+人工核验的官方文档、补充检索评测问题,必要时再替换神经 embedding 或增加
+`/api/knowledge/search` 管理调试入口;不要先上 Qdrant/reranker。
+
+### 2026-10-20(路线质量扩展 live 验证:深圳 / 厦门 / 洛阳 / 大同)
+
+继续验证首版 35km / 70km 固定距离约束在亲子、步行和二线城市上的泛化能力。
+本轮没有改运行时代码,使用全新一次性账号、每个 case 前清空长期偏好,真实调用
+`POST /api/trip/plan/stream`。
+
+**live 结果:**
+
+1. `shenzhen-family-3d`:47.7 秒,100 分;非必去远景点 0,
+   三日路线跨度 15.7 / 15.0 / 0.0km(上限 70km);
+2. `xiamen-relaxed-2d`:49.0 秒,100 分;25km 外非必去景点 0,
+   两日路线跨度均为 0.2km(上限 45km);
+3. `luoyang-longmen-3d`:45.4 秒,100 分;龙门石窟必去约束通过;
+4. `datong-yungang-3d`:57.0 秒,100 分;云冈石窟必去约束通过。
+
+汇总 **4/4 通过、平均分 100、平均 49.77 秒、降级 0**。结合此前批次,
+目前已有 8 个不同城市场景通过 live 基线。期间 MCP 日志仍出现已知的 Windows
+`_ProactorBasePipeTransport` connection reset 回调,但四份计划均成功,没有降级。
+
+报告位于 `evals/results/latest.json` / `latest.md`。由于本轮没有修改运行时代码,
+没有重复运行离线测试。
+
+**范围边界:** 不再按城市穷举 golden cases。当前 8 个 live 场景已经覆盖经典历史、
+亲子休闲、步行紧凑、饮食偏好和远距离必去,足以判断首版固定阈值是否可用。
+剩余 case 只在三种情况下运行:用户明确要求;出现线上失败需要回归;功能变更
+影响了检索、排序或必去约束。固定阈值暂不需要改成城市分位数或聚类。
 
 ### 2026-10-20(行程质量约束:距离排序 + 紧凑路线评测)
 
@@ -1258,12 +1362,34 @@ LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成�
 
 ### P0 · 记忆与鉴权(基础闭环已完成)
 
+> **2026-10-27 RAG 质量基线**:38 题离线评测已达到 `Hit@5=100%`、
+> `MRR@5=1.0000`、无答案误命中 `0/16`、城市串库 `0`、P95 约 14~19ms。
+> 中文 BM25 已改字符二元组,并加入 BGE + BM25 双门槛。阈值是当前 11 个知识卡
+> 的校准值;**扩资料或换 embedding 后必须先重跑 `scripts/eval_rag.py`**。
+> 下一步不继续扩城市或知识卡,转向结构化日志、request id、全局并发背压等
+> 运行可靠性工作;缓存、Qdrant、reranker 和聊天知识问答继续延后。
+
+> **2026-10-20 RAG 进展**：公共旅行知识 RAG 已按 C8 重做。
+> 核心位于 `app/rag/` 独立子包：`BAAI/bge-small-zh-v1.5` + FAISS +
+> BM25 Top 5 + RRF(k=60)、Markdown 标题切片、城市/有效期过滤、
+> LangGraph 第四路并行检索、响应来源字段和前端来源展示均已落地;
+> 规划仍只有一次模型调用。首版种子库为 11 个内部知识卡,不是官方实时公告。
+> `pytest` **271 passed / 1 staged skip**,真实本地 BGE 索引验证通过,
+> `npm run build` 通过。聊天知识问答、Qdrant 和 reranker
+> 仍明确延后;后续只按真实需求补充人工核验资料,不按城市批量扩张。
+
+> **2026-10-20 追加进度与范围纠偏**:首版固定距离阈值已在深圳亲子、厦门步行、
+> 洛阳龙门石窟和大同云冈石窟四个 live case 上全部通过,最新批次 **4/4、
+> 平均分 100、平均 49.77 秒、降级 0**;累计已有 8 个不同城市场景通过。
+> **不再按全国城市穷举评测**;剩余 case 只在用户要求、线上失败回归或相关功能
+> 变更时运行。当前固定阈值保持现状,不改造成分位数 / 聚类方案。
+
 > **2026-10-20 进度**:**行程质量约束模块已完成**。景点候选现在按城市中心距离和
 > 紧凑偏好确定性排序,家庭 / 休闲请求在候选充足时会过滤 35 公里外非必去项;
 > golden case 新增北京亲子回归及 `route_quality`。全新隔离账号的 4 个高差异
-> live case 为 **4/4 通过、平均分 100、平均 58.12 秒、降级 0**。下一轮应扩大
-> 深圳亲子、厦门步行和更多二线城市样本,验证固定距离阈值是否需要改成
-> “城市尺度分位数 + 景点聚类”;RAG 与缓存仍排在质量基线稳定之后。
+> live case 为 **4/4 通过、平均分 100、平均 58.12 秒、降级 0**。随后新增的
+> 深圳、厦门、洛阳、大同验证也全部通过;质量范围验证到此收敛,**不再按城市
+> 穷举**。只有出现失败样本或相关功能变更时才补回归,不为了覆盖率盲目烧额度。
 
 > **2026-10-19 进度**:第 1 步“服务端会话 + refine”已完成并提交
 > (`71a0bc1`);`memory_facts` 的事实生命周期与
@@ -1325,21 +1451,21 @@ LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成�
    加 `GET/DELETE /api/memory/{user_id}` 管理接口(隐私需要);响应带 `used_memory`。
 3. **情景记忆召回**:结构化过滤取最近相关行程,拼进提示词。
 
-> RAG 知识库继续往后排(见本节末尾"明确不要做")。
+> RAG 知识库已完成 MVP 与检索评测,现状见下一节。
 
-### P0.5 · 公共旅行知识 RAG —— 方案已保存,暂缓实施
+### P0.5 · 公共旅行知识 RAG —— MVP 与检索评测已完成
 
-> **2026-10-19 状态**:用户要求先保存方案、晚点再做。完整设计见
-> `RAG_PLAN.md`。当前不新增依赖、不改运行时代码,也不打断记忆系统主线。
+> **2026-10-27 状态**:Phase 1~3、38 题离线检索评测和无答案拒答均已完成。
+> 后续只按真实业务需求补充人工核验资料,并在资料变化后重跑评测。
 
-启动时按以下顺序推进:
+当前完成情况:
 
-1. 先确定首批城市/景区知识范围和来源白名单,准备 30~50 个评测问题;
-2. 做 SQLite 关键词 + embedding 混合检索 MVP,暂不引入独立向量库;
-3. LangGraph 增加与三路实时检索并行的 `search_knowledge` 节点,规划仍只调用一次模型;
-4. 响应增加服务层生成的 `knowledge_sources`,不让模型自行编造引用;
-5. RAG 无命中、超时或索引失败不得阻断主流程,只标记 `knowledge_degraded`;
-6. 等规划链路稳定后,再评估聊天知识问答、reranker 和 Qdrant/pgvector。
+1. 首版 11 个知识卡、10 个城市和 38 个评测问题已落地;
+2. BGE + FAISS + 中文 BM25 + RRF 混合检索已落地,暂不引入独立向量库;
+3. LangGraph 第四路 `search_knowledge` 已与实时检索并行,规划仍只调用一次模型;
+4. 响应只使用服务层生成的 `knowledge_sources`;
+5. RAG 无命中、超时或索引失败只标记 `knowledge_degraded`;
+6. 聊天知识问答、reranker 和 Qdrant/pgvector 继续延后。
 
 **明确边界:** 高德仍是坐标、天气、酒店等动态事实的权威来源;用户记忆继续使用
 SQLite 结构化存储,不写入公共知识向量索引。
@@ -1348,7 +1474,8 @@ SQLite 结构化存储,不写入公共知识向量索引。
 
 同一 (city, preferences, 日期, 住宿) 直接复用上次的 `TripPlan`(带 TTL)。
 这是唯一能把**重复请求**压进秒级的手段 —— 但 2026-10-16 用户明确说
-"留着以后优化的时候做",所以先标记在这里,等记忆系统做完再回来。
+"留着以后优化的时候做"。记忆系统现已完成;缓存仍需先定义天气、闭馆和价格等
+动态信息的 TTL 与失效规则,当前不启动。
 
 ### P2 · 其它优化(原 P0 剩下的)
 
@@ -1393,7 +1520,8 @@ SQLite 结构化存储,不写入公共知识向量索引。
 
 ### 明确不要做
 
-- **RAG 知识库**:等记忆系统做完再说(先把"记住人"做扎实,再谈"记住知识")。
+- **无依据扩量 RAG 知识库**:当前 11 个知识卡和 38 题评测已形成基线;不为
+  覆盖率批量添加未核验资料,不先上独立向量库或 reranker。
 - **感知记忆 / 知识图谱 / Qdrant**:课程里那套完整架构对本项目过重,且没有需求来源。
 - ~~在单轮请求跑通之前不要动记忆~~:**这条已经解除** —— 单轮请求 2026-10-16 跑通
   (`degraded=false`、57s、SSE 流式),现在正是做记忆的时候。

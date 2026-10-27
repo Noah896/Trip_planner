@@ -15,7 +15,14 @@ from fastapi.testclient import TestClient
 from app.agents.trip_planner_agent import PlanOutcome
 from app.api.main import app
 from app.api.routes import trip as trip_routes
-from app.models.schemas import Attraction, DayPlan, Location, Meal, TripPlan
+from app.models.schemas import (
+    Attraction,
+    DayPlan,
+    KnowledgeSource,
+    Location,
+    Meal,
+    TripPlan,
+)
 
 PLACEHOLDER_CITY = "北京"
 
@@ -139,6 +146,42 @@ def test_plan_success_response_shape(client: TestClient, install_agent):
     assert len(body["data"]["days"]) == 2
     assert body["data"]["days"][0]["attractions"][0]["location"]["longitude"] == 116.4
     assert body["used_memory"] == []
+    assert body["knowledge_used"] is False
+    assert body["knowledge_degraded"] is False
+    assert body["knowledge_status"] == "disabled"
+    assert body["knowledge_sources"] == []
+
+
+def test_plan_forwards_knowledge_sources(client: TestClient, install_agent):
+    install_agent(
+        PlanOutcome(
+            plan=_build_plan(),
+            knowledge_used=True,
+            knowledge_degraded=False,
+            knowledge_status="ok",
+            knowledge_sources=[
+                KnowledgeSource(
+                    id="K1",
+                    chunk_id="beijing-palace-visit-001:000",
+                    title="故宫博物院参观准备提示",
+                    section="预约与开放",
+                    publisher="项目旅行知识卡",
+                    source_url="https://www.dpm.org.cn/",
+                    verified_at="2026-10-20",
+                    category="博物馆规则",
+                )
+            ],
+        )
+    )
+
+    response = client.post("/api/trip/plan", json=VALID_REQUEST)
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["knowledge_used"] is True
+    assert body["knowledge_status"] == "ok"
+    assert body["knowledge_sources"][0]["id"] == "K1"
+    assert body["knowledge_sources"][0]["verified_at"] == "2026-10-20"
 
 
 def test_plan_marks_placeholder_result_as_degraded(client: TestClient, install_agent):

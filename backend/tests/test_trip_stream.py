@@ -20,6 +20,7 @@ from app.agents.trip_planner_agent import MultiAgentTripPlanner
 from app.api.main import app
 from app.api.routes import trip as trip_routes
 from app.models.schemas import Attraction, DayPlan, Location, TripPlan, TripRequest
+from app.services.knowledge_retrieval import KnowledgeRetrievalResult
 
 VALID_REQUEST = {
     "city": "北京",
@@ -122,6 +123,16 @@ def _full_updates() -> List[Dict[str, Any]]:
         {"search_attractions": {"attraction_result": "1. 故宫博物院"}},
         {"query_weather": {"weather_result": "2025-06-01 / 晴"}},
         {"search_hotels": {"hotel_result": "1. 某酒店"}},
+        {
+            "search_knowledge": {
+                "knowledge_result": KnowledgeRetrievalResult(
+                    enabled=True,
+                    used=True,
+                    status="ok",
+                    evidence="[K1] 来源:测试",
+                )
+            }
+        },
         {"generate_plan": {"plan": _plan()}},
     ]
 
@@ -140,21 +151,23 @@ class TestEventSequence:
 
         progress = [event for event in events if event["type"] == "progress"]
 
-        # 开头先把三路检索标成"进行中"(它们本来就是并行开始的),
+        # 开头先把四路检索标成"进行中"(它们本来就是并行开始的),
         # 否则前端要等第一个节点跑完才有进度可看。
-        assert [(e["label"], e["status"]) for e in progress[:3]] == [
+        assert [(e["label"], e["status"]) for e in progress[:4]] == [
             ("景点检索", "running"),
             ("天气查询", "running"),
             ("酒店检索", "running"),
+            ("知识检索", "running"),
         ]
-        # 然后三路逐个 done
-        assert [(e["label"], e["status"]) for e in progress[3:6]] == [
+        # 然后四路逐个 done
+        assert [(e["label"], e["status"]) for e in progress[4:8]] == [
             ("景点检索", "done"),
             ("天气查询", "done"),
             ("酒店检索", "done"),
+            ("知识检索", "done"),
         ]
         # 最后才是"生成行程":先 running 再 done
-        assert [(e["label"], e["status"]) for e in progress[6:]] == [
+        assert [(e["label"], e["status"]) for e in progress[8:]] == [
             ("生成行程", "running"),
             ("生成行程", "done"),
         ]
@@ -189,6 +202,13 @@ class TestEventSequence:
                         "search_attractions": {"attraction_result": "a"},
                         "query_weather": {"weather_result": "b"},
                         "search_hotels": {"hotel_result": "c"},
+                        "search_knowledge": {
+                            "knowledge_result": KnowledgeRetrievalResult(
+                                enabled=True,
+                                degraded=True,
+                                status="no_match",
+                            )
+                        },
                     },
                     {"generate_plan": {"plan": _plan()}},
                 ]
@@ -200,7 +220,13 @@ class TestEventSequence:
             for event in events
             if event["type"] == "progress" and event["status"] == "done"
         ]
-        assert done_labels == ["景点检索", "天气查询", "酒店检索", "生成行程"]
+        assert done_labels == [
+            "景点检索",
+            "天气查询",
+            "酒店检索",
+            "知识检索",
+            "生成行程",
+        ]
 
 
 class TestDegradedPaths:

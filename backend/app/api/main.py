@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ..config import get_settings, print_config, validate_config
 from ..services.amap_mcp import shutdown_amap_server
+from ..services.knowledge_retrieval import initialize_knowledge_service
 from .routes import auth
 from .routes import chat
 from .routes import history
@@ -35,6 +36,15 @@ async def lifespan(app: FastAPI):
         print(f"\n❌ 配置验证失败:\n{e}")
         print("\n请检查.env文件并确保所有必要的配置项都已设置")
         raise
+
+    if settings.rag_enabled:
+        print("\n📚 正在预热 BGE / FAISS / BM25 知识检索...")
+        try:
+            initialize_knowledge_service()
+            print("✅ 知识检索初始化完成")
+        except Exception as exc:
+            # RAG 是可选增强能力；预热失败不能阻止后端启动。
+            print(f"⚠️ 知识检索初始化失败,将在请求时降级: {type(exc).__name__}: {exc}")
 
     print("\n" + "=" * 60)
     print("📚 API文档: http://localhost:8000/docs")

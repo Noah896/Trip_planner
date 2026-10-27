@@ -115,6 +115,17 @@ export interface UsedMemoryFact {
   source_text: string
 }
 
+export interface KnowledgeSource {
+  id: string
+  chunk_id: string
+  title: string
+  section: string
+  publisher: string
+  source_url: string
+  verified_at: string
+  category: string
+}
+
 export interface HistoryUsage {
   history_id: number
   city: string
@@ -135,6 +146,10 @@ export interface TripPlanResponse {
   memory_version?: number
   used_memory?: UsedMemoryFact[]
   used_history?: HistoryUsage | null
+  knowledge_used?: boolean
+  knowledge_degraded?: boolean
+  knowledge_status?: string
+  knowledge_sources?: KnowledgeSource[]
 }
 
 
@@ -185,6 +200,10 @@ export interface TripStreamResult {
   memory_version?: number
   used_memory?: UsedMemoryFact[]
   used_history?: HistoryUsage | null
+  knowledge_used?: boolean
+  knowledge_degraded?: boolean
+  knowledge_status?: string
+  knowledge_sources?: KnowledgeSource[]
 }
 
 /** 流中途出错(此时 HTTP 状态码已经是 200,只能靠事件报错) */
@@ -216,6 +235,10 @@ export interface ChatArtifactEvent {
   data: TripPlan
   used_memory?: UsedMemoryFact[]
   used_history?: HistoryUsage | null
+  knowledge_used?: boolean
+  knowledge_degraded?: boolean
+  knowledge_status?: string
+  knowledge_sources?: KnowledgeSource[]
 }
 
 export interface ChatDoneEvent {
@@ -226,6 +249,10 @@ export interface ChatDoneEvent {
   memory_version?: number
   used_memory?: UsedMemoryFact[]
   used_history?: HistoryUsage | null
+  knowledge_used?: boolean
+  knowledge_degraded?: boolean
+  knowledge_status?: string
+  knowledge_sources?: KnowledgeSource[]
 }
 
 export interface ChatErrorEvent {

@@ -32,3 +32,20 @@ $env:TRIP_AUTH_PASSWORD='eval-password'
 `--keep-evaluation-memory`。脚本不会传 `session_id`，因此不会写入新的历史行程。
 
 报告默认写入 `evals/results/latest.json` 和 `evals/results/latest.md`。
+
+## RAG 检索评测
+
+```powershell
+& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\eval_rag.py
+```
+
+该命令使用本地 BGE/FAISS/BM25,不调用生成模型。评测集位于
+`knowledge/eval_questions.jsonl`,统计 `Hit@5`、`MRR@5`、无答案误命中率、
+城市串库率和检索延迟,报告写入 `evals/results/rag/`。
+
+需要设置质量门禁时,可显式传入阈值:
+
+```powershell
+& 'E:\hello agents_demo\.venv\Scripts\python.exe' -X utf8 scripts\eval_rag.py `
+  --min-hit-at-5 1.0 --max-no-answer-false-positive-rate 0.0 --max-p95-ms 1500
+```

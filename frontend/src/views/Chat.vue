@@ -39,6 +39,11 @@
               :used-history="msg.usedHistory"
               compact
             />
+            <KnowledgeSources
+              :sources="msg.knowledgeSources ?? []"
+              :degraded="msg.knowledgeDegraded"
+              :status="msg.knowledgeStatus"
+            />
             <TripPlanView :plan="msg.plan" />
             <div class="artifact-actions">
               <a-button type="primary" size="small" @click="openResult">
@@ -66,6 +71,7 @@
 <script setup lang="ts">
 import { nextTick, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import KnowledgeSources from '@/components/KnowledgeSources.vue'
 import MemoryReceipt from '@/components/MemoryReceipt.vue'
 import TripPlanView from '@/components/TripPlanView.vue'
 import { chatStream } from '@/services/api'
@@ -73,6 +79,7 @@ import { getMemoryIdentity } from '@/services/session'
 import type {
   ChatTurn,
   HistoryUsage,
+  KnowledgeSource,
   TripPlan,
   TripProgressEvent,
   UsedMemoryFact
@@ -95,14 +102,16 @@ interface ChatBubble {
   failed?: boolean
   usedMemory?: UsedMemoryFact[]
   usedHistory?: HistoryUsage | null
+  knowledgeSources?: KnowledgeSource[]
+  knowledgeDegraded?: boolean
+  knowledgeStatus?: string
 }
 
 const router = useRouter()
 const memoryIdentity = getMemoryIdentity()
 
-// 这四步是后端进度事件里会出现的阶段(与 NODE_LABELS 对应)。
-// 一开始就按"等待中"列出来,免得前 10 秒界面看着像死了。
-const STAGE_LABELS = ['景点检索', '天气查询', '酒店检索', '生成行程']
+// 这些阶段与后端 NODE_LABELS 对应。四路检索并行,生成行程最后执行。
+const STAGE_LABELS = ['景点检索', '天气查询', '酒店检索', '知识检索', '生成行程']
 
 const STARTERS = [
   '带六岁小孩,北京玩三天,下周末出发',
@@ -120,6 +129,9 @@ const latestPlan = ref<TripPlan | null>(null)
 const latestDegraded = ref(false)
 const latestUsedMemory = ref<UsedMemoryFact[]>([])
 const latestUsedHistory = ref<HistoryUsage | null>(null)
+const latestKnowledgeSources = ref<KnowledgeSource[]>([])
+const latestKnowledgeDegraded = ref(false)
+const latestKnowledgeStatus = ref('disabled')
 const hasPlan = ref(false)
 
 const stageIcon = (status: StageStatus): string => {
@@ -148,7 +160,7 @@ const applyProgress = (index: number, event: TripProgressEvent) => {
     return
   }
 
-  // 三路检索是并行的,事件到达顺序不固定;按固定顺序插进去,
+  // 四路检索是并行的,事件到达顺序不固定;按固定顺序插进去,
   // 免得清单每次刷新都换位置。
   const row2 = { label: event.label, status: event.status, elapsed: event.elapsed }
   const rank = (label: string) => {
@@ -209,10 +221,16 @@ const send = async () => {
           msg.degraded = event.degraded
           msg.usedMemory = event.used_memory ?? []
           msg.usedHistory = event.used_history ?? null
+          msg.knowledgeSources = event.knowledge_sources ?? []
+          msg.knowledgeDegraded = event.knowledge_degraded ?? false
+          msg.knowledgeStatus = event.knowledge_status ?? 'disabled'
           latestPlan.value = event.data
           latestDegraded.value = event.degraded
           latestUsedMemory.value = msg.usedMemory
           latestUsedHistory.value = msg.usedHistory
+          latestKnowledgeSources.value = msg.knowledgeSources
+          latestKnowledgeDegraded.value = msg.knowledgeDegraded
+          latestKnowledgeStatus.value = msg.knowledgeStatus
           hasPlan.value = true
           scrollToBottom()
         }
@@ -259,7 +277,11 @@ const openResult = () => {
     'tripPlanMemoryReceipt',
     JSON.stringify({
       used_memory: latestUsedMemory.value,
-      used_history: latestUsedHistory.value
+      used_history: latestUsedHistory.value,
+      knowledge_used: latestKnowledgeSources.value.length > 0,
+      knowledge_degraded: latestKnowledgeDegraded.value,
+      knowledge_status: latestKnowledgeStatus.value,
+      knowledge_sources: latestKnowledgeSources.value
     })
   )
   router.push('/result')

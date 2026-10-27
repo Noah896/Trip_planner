@@ -244,13 +244,14 @@ interface LoadingStage {
   elapsed?: number
 }
 
-// 与后端 NODE_LABELS 对应。进度条按**权重**走:前三个检索各 10%,
-// 生成行程占 70% —— 它自己实测就要 25~30 秒,平摊成 25% 会让进度条看着像卡住。
+// 与后端 NODE_LABELS 对应。进度条按**权重**走:前四路检索各 10%,
+// 生成行程占 60% —— 它自己实测就要 25~30 秒,平摊成小权重会让进度条看着像卡住。
 const STAGE_WEIGHTS: Record<string, number> = {
   景点检索: 10,
   天气查询: 10,
   酒店检索: 10,
-  生成行程: 70
+  知识检索: 10,
+  生成行程: 60
 }
 
 const loadingStages = ref<LoadingStage[]>([])
@@ -381,7 +382,11 @@ const handleSubmit = async () => {
         'tripPlanMemoryReceipt',
         JSON.stringify({
           used_memory: response.used_memory ?? [],
-          used_history: response.used_history ?? null
+          used_history: response.used_history ?? null,
+          knowledge_used: response.knowledge_used ?? false,
+          knowledge_degraded: response.knowledge_degraded ?? false,
+          knowledge_status: response.knowledge_status ?? 'disabled',
+          knowledge_sources: response.knowledge_sources ?? []
         })
       )
 

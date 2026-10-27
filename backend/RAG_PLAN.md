@@ -1,10 +1,42 @@
 # 公共旅行知识 RAG 方案
 
-> 状态:**方案已保存,暂不实施**
+> 状态:**Phase 1~3 MVP 与离线检索评测已完成(2026-10-27)**
 >
 > 记录日期:2026-10-19
 >
 > 适用范围:中国大陆旅行规划,与现有高德实时检索、SQLite 会话记忆配合使用。
+
+## 实施结果(2026-10-20，已按 C8 重做)
+
+RAG retrieval 已切换到 `E:\all-in-rag\code\C8` 的技术栈:
+
+- embedding：`BAAI/bge-small-zh-v1.5`，CPU、归一化 512 维向量；
+- 索引：LangChain FAISS，持久化为 `index.faiss` + `index.pkl`；
+- 切片：`MarkdownHeaderTextSplitter`，保留 `#/##/###` 标题路径；
+- 召回：FAISS Top 5 + BM25 Top 5，使用 RRF(k=60) 融合；
+- 过滤：先混合召回，再按城市 metadata 和生效/失效日期过滤；
+- RAG 核心位于 `app/rag/` 子包，不依赖其它 `app.*` 模块、FastAPI 或 Pydantic；
+  `app/services/knowledge_retrieval.py` 仅负责业务配置和响应模型适配;
+- 应用启动时预热 BGE/FAISS/BM25；单次查询超时或失败只标记
+  `knowledge_degraded`;
+- `TripPlanResponse` / SSE / 聊天 artifact 返回 `knowledge_used`、
+  `knowledge_degraded`、`knowledge_status` 和 `knowledge_sources`;
+- 首页进度、聊天卡片和结果页展示知识检索状态、发布方、核验日期与来源链接;
+- 首版种子库 11 个文档、11 个切片、覆盖 10 个城市,仅作为“项目整理知识卡”,
+  不是官方实时公告。
+- 新增 `knowledge/eval_questions.jsonl`、`evals/rag_evaluator.py` 和
+  `scripts/eval_rag.py`,覆盖精确事实、口语同义、城市冲突、实时边界和无答案;
+- 中文 BM25 改用无额外依赖的字符二元组,并用“BGE 语义分 + BM25 字词证据”
+  双门槛拒绝无关候选;
+- 38 题真实 BGE 基线为 `Hit@5=100%`、`MRR@5=1.0000`、无答案误命中
+  `0/16`、城市串库 `0`、重复运行检索 P95 约 14~19ms。
+
+评测问题数量已达到 Phase 0 目标;知识文档仍保持首版 11 个,只按真实业务需求
+补充经过人工核验的资料。当前阈值为小语料校准值,增加文档或更换 embedding 后
+必须重跑评测。
+
+当前明确边界:聊天知识问答仍未接入;C8 的 Moonshot 回答生成模块不属于
+retrieval，不引入第二次模型调用；新增正式资料时仍须人工核验来源和有效期。
 
 ## 1. 目标与边界
 
@@ -374,7 +406,7 @@ scripts/ingest_knowledge.py
 
 - 确定首批知识范围;
 - 准备 30~50 个高质量文档;
-- 准备 30~50 个评测问题;
+- 准备 30~50 个评测问题(已完成 38 个);
 - 定义来源白名单和有效期规则。
 
 ### Phase 1:离线索引 MVP
@@ -414,4 +446,3 @@ scripts/ingest_knowledge.py
 - 不让模型自行生成来源 URL;
 - 不在第一版同时引入独立向量数据库、reranker 和多套 embedding;
 - 不因为 RAG 失败就把整次行程判定为 `degraded=true`。
-

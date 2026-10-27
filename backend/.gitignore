@@ -49,6 +49,9 @@ htmlcov/
 data/*.sqlite3
 data/*.sqlite3-*
 
+# 本地 FAISS 知识索引
+data/trip_knowledge_faiss/
+
 # 评测产物
 evals/results/
 

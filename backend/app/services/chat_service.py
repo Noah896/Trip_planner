@@ -1122,12 +1122,19 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
     )
     memory_saved = False
     memory_version: Optional[int] = None
+    knowledge_state: Dict[str, Any] = {}
 
     async for event in stream:
         event_type = event.get("type")
         if event_type == "progress":
             yield event
         elif event_type == "result":
+            knowledge_state = {
+                "used": event.get("knowledge_used", False),
+                "degraded": event.get("knowledge_degraded", False),
+                "status": event.get("knowledge_status", "disabled"),
+                "sources": event.get("knowledge_sources", []),
+            }
             if (
                 session_id
                 and not event.get("degraded", False)
@@ -1169,6 +1176,10 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
                 "memory_saved": memory_saved,
                 "used_memory": used_memory,
                 "used_history": used_history,
+                "knowledge_used": event.get("knowledge_used", False),
+                "knowledge_degraded": event.get("knowledge_degraded", False),
+                "knowledge_status": event.get("knowledge_status", "disabled"),
+                "knowledge_sources": event.get("knowledge_sources", []),
             }
         else:
             yield event
@@ -1181,4 +1192,12 @@ async def run_chat(request: ChatRequest) -> AsyncIterator[Dict[str, Any]]:
         "memory_version": memory_version,
         "used_memory": used_memory,
         "used_history": used_history,
+        "knowledge_used": bool(knowledge_state.get("used", False)),
+        "knowledge_degraded": bool(
+            knowledge_state.get("degraded", False)
+        ),
+        "knowledge_status": str(
+            knowledge_state.get("status", "disabled")
+        ),
+        "knowledge_sources": list(knowledge_state.get("sources", [])),
     }

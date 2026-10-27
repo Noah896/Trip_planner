@@ -52,6 +52,17 @@
       <MemoryReceipt :used-memory="usedMemory" :used-history="usedHistory" />
     </div>
 
+    <div
+      v-if="tripPlan && (knowledgeSources.length || knowledgeDegraded)"
+      class="knowledge-receipt-wrapper"
+    >
+      <KnowledgeSources
+        :sources="knowledgeSources"
+        :degraded="knowledgeDegraded"
+        :status="knowledgeStatus"
+      />
+    </div>
+
     <div v-if="tripPlan" class="content-wrapper">
       <!-- 侧边导航 -->
       <div class="side-nav">
@@ -332,8 +343,9 @@ import { DownOutlined } from '@ant-design/icons-vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
+import KnowledgeSources from '@/components/KnowledgeSources.vue'
 import MemoryReceipt from '@/components/MemoryReceipt.vue'
-import type { HistoryUsage, TripPlan, UsedMemoryFact } from '@/types'
+import type { HistoryUsage, KnowledgeSource, TripPlan, UsedMemoryFact } from '@/types'
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
@@ -341,6 +353,9 @@ const tripPlan = ref<TripPlan | null>(null)
 const degraded = ref(false)
 const usedMemory = ref<UsedMemoryFact[]>([])
 const usedHistory = ref<HistoryUsage | null>(null)
+const knowledgeSources = ref<KnowledgeSource[]>([])
+const knowledgeDegraded = ref(false)
+const knowledgeStatus = ref('disabled')
 const editMode = ref(false)
 const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
@@ -361,9 +376,17 @@ onMounted(async () => {
           ? parsed.used_memory
           : []
         usedHistory.value = parsed.used_history ?? null
+        knowledgeSources.value = Array.isArray(parsed.knowledge_sources)
+          ? parsed.knowledge_sources
+          : []
+        knowledgeDegraded.value = Boolean(parsed.knowledge_degraded)
+        knowledgeStatus.value = parsed.knowledge_status ?? 'disabled'
       } catch {
         usedMemory.value = []
         usedHistory.value = null
+        knowledgeSources.value = []
+        knowledgeDegraded.value = false
+        knowledgeStatus.value = 'disabled'
       }
     }
     // 加载景点图片
@@ -985,6 +1008,11 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 }
 
 .memory-receipt-wrapper {
+  max-width: 1400px;
+  margin: 0 auto 16px;
+}
+
+.knowledge-receipt-wrapper {
   max-width: 1400px;
   margin: 0 auto 16px;
 }
