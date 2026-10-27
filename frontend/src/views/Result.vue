@@ -217,8 +217,21 @@
                           :src="getAttractionImage(item.name, index)"
                           :alt="item.name"
                           class="attraction-image"
-                          @error="handleImageError"
+                          @error="handleImageError($event, item.name, index)"
                         />
+                        <div v-if="!attractionPhotos[item.name]" class="image-placeholder-label">
+                          景点示意图
+                        </div>
+                        <a
+                          v-if="attractionPhotoMeta[item.name]?.source_url"
+                          class="image-source-link"
+                          :href="attractionPhotoMeta[item.name].source_url"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          @click.stop
+                        >
+                          图源 Wikimedia Commons
+                        </a>
                         <div class="attraction-badge">
                           <span class="badge-number">{{ index + 1 }}</span>
                         </div>
@@ -358,7 +371,15 @@ const knowledgeDegraded = ref(false)
 const knowledgeStatus = ref('disabled')
 const editMode = ref(false)
 const originalPlan = ref<TripPlan | null>(null)
+
+interface AttractionPhotoMeta {
+  provider: string
+  source_url: string
+  title: string
+}
+
 const attractionPhotos = ref<Record<string, string>>({})
+const attractionPhotoMeta = ref<Record<string, AttractionPhotoMeta>>({})
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
 let map: any = null
@@ -389,8 +410,8 @@ onMounted(async () => {
         knowledgeStatus.value = 'disabled'
       }
     }
-    // 加载景点图片
-    await loadAttractionPhotos()
+    // 图片是增强内容,不能阻塞地图和页面正文渲染。
+    void loadAttractionPhotos()
     // 等待DOM渲染完成后初始化地图
     await nextTick()
     initMap()
@@ -487,26 +508,38 @@ const getMealLabel = (type: string): string => {
 const loadAttractionPhotos = async () => {
   if (!tripPlan.value) return
 
-  const promises: Promise<void>[] = []
+  const city = tripPlan.value.city
+  const names = Array.from(new Set(
+    tripPlan.value.days.flatMap(day => day.attractions.map(item => item.name))
+  ))
+  const baseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
-  tripPlan.value.days.forEach(day => {
-    day.attractions.forEach(attraction => {
-      const promise = fetch(`http://localhost:8000/api/poi/photo?name=${encodeURIComponent(attraction.name)}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data.success && data.data.photo_url) {
-            attractionPhotos.value[attraction.name] = data.data.photo_url
-          }
-        })
-        .catch(err => {
-          console.error(`获取${attraction.name}图片失败:`, err)
-        })
+  await Promise.allSettled(names.map(async name => {
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 12000)
+    try {
+      const response = await fetch(
+        `${baseUrl}/api/poi/photo?name=${encodeURIComponent(name)}&city=${encodeURIComponent(city)}`,
+        { signal: controller.signal }
+      )
+      if (!response.ok) return
+      const data = await response.json()
+      if (!data.success || !data.data?.photo_url) return
 
-      promises.push(promise)
-    })
-  })
-
-  await Promise.all(promises)
+      attractionPhotos.value[name] = data.data.photo_url
+      attractionPhotoMeta.value[name] = {
+        provider: data.data.provider || '',
+        source_url: data.data.source_url || '',
+        title: data.data.title || ''
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        console.error(`获取${name}图片失败:`, err)
+      }
+    } finally {
+      window.clearTimeout(timeout)
+    }
+  }))
 }
 
 // 获取景点图片
@@ -527,7 +560,11 @@ const getAttractionImage = (name: string, index: number): string => {
   const colorIndex = index % colors.length
   const { start, end } = colors[colorIndex]
 
-  // 使用base64编码避免中文问题
+  const escapedName = name
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">
     <defs>
       <linearGradient id="grad${index}" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -536,17 +573,22 @@ const getAttractionImage = (name: string, index: number): string => {
       </linearGradient>
     </defs>
     <rect width="400" height="300" fill="url(#grad${index})"/>
-    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="white">${name}</text>
+    <circle cx="200" cy="108" r="42" fill="rgba(255,255,255,0.16)"/>
+    <path d="M152 160 L188 116 L216 146 L238 128 L264 160 Z" fill="rgba(255,255,255,0.88)"/>
+    <circle cx="236" cy="102" r="12" fill="rgba(255,255,255,0.9)"/>
+    <text x="50%" y="205" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="white">${escapedName}</text>
+    <text x="50%" y="238" text-anchor="middle" font-family="sans-serif" font-size="14" fill="rgba(255,255,255,0.82)">旅行景点示意图</text>
   </svg>`
 
-  return `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
 }
 
 // 图片加载失败时的处理
-const handleImageError = (event: Event) => {
+const handleImageError = (event: Event, name: string, index: number) => {
   const img = event.target as HTMLImageElement
-  // 使用灰色占位图
-  img.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="400" height="300"%3E%3Crect width="400" height="300" fill="%23f0f0f0"/%3E%3Ctext x="50%25" y="50%25" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="18" fill="%23999"%3E图片加载失败%3C/text%3E%3C/svg%3E'
+  delete attractionPhotos.value[name]
+  delete attractionPhotoMeta.value[name]
+  img.src = getAttractionImage(name, index)
 }
 
 
@@ -1061,6 +1103,27 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   height: 200px;
   object-fit: cover;
   transition: transform 0.3s ease;
+}
+
+.image-placeholder-label,
+.image-source-link {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.52);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.image-source-link {
+  text-decoration: none;
+}
+
+.image-source-link:hover {
+  background: rgba(0, 0, 0, 0.72);
 }
 
 .attraction-image-wrapper:hover .attraction-image {

@@ -89,7 +89,7 @@ macOS / Linux 把第 5 步换成两句话即可:
 | `HOST` / `PORT` | 否 | 默认 `0.0.0.0:8000` |
 | `CORS_ORIGINS` | 否 | 允许的前端来源,逗号分隔 |
 | `LOG_LEVEL` | 否 | uvicorn 日志级别,默认 `INFO` |
-| `UNSPLASH_ACCESS_KEY` | 否 | 不配则景点配图接口返回空 |
+| `UNSPLASH_ACCESS_KEY` | 否 | 旧字段兼容保留;景点图片已改用 Wikimedia Commons |
 | `AMAP_MCP_COMMAND` / `AMAP_MCP_ARGS` | 否 | 自定义 MCP 启动命令,默认 `uvx amap-mcp-server` |
 
 ### `frontend/.env`
@@ -118,7 +118,7 @@ macOS / Linux 把第 5 步换成两句话即可:
 | POST | `/api/map/route` | 路线规划 |
 | GET | `/api/map/health` | 高德 Key 是否配置 |
 | GET | `/api/poi/detail/{poi_id}` | POI 详情 |
-| GET | `/api/poi/photo` | 景点配图(Unsplash,未配置时为空) |
+| GET | `/api/poi/photo` | 景点配图(Wikimedia Commons,失败时前端显示本地示意图) |
 
 ### 生成一份计划
 
@@ -225,7 +225,7 @@ trip_planner/
 │  │  ├─ agents/trip_planner_agent.py   # LangGraph 多智能体编排(核心)
 │  │  ├─ api/main.py                    # FastAPI 应用与 lifespan
 │  │  ├─ api/routes/                    # trip / map / poi 路由
-│  │  ├─ services/                      # LLM、高德 MCP、Unsplash
+│  │  ├─ services/                      # LLM、高德 MCP、Wikimedia 图片
 │  │  ├─ models/schemas.py              # Pydantic 请求/响应模型
 │  │  ├─ utils/json_utils.py            # LLM / MCP 返回值解析
 │  │  └─ config.py                      # 配置与环境变量

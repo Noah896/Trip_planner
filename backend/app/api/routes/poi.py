@@ -6,9 +6,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from ...services.amap_service import get_amap_service
-from ...services.unsplash_service import get_unsplash_service
+from ...services.wikimedia_photo_service import get_wikimedia_photo_service
 
 router = APIRouter(prefix="/poi", tags=["POI"])
+_photo_request_semaphore = asyncio.Semaphore(3)
 
 
 class POIDetailResponse(BaseModel):
@@ -91,9 +92,9 @@ async def search_poi(keywords: str, city: str = "北京"):
 @router.get(
     "/photo",
     summary="获取景点图片",
-    description="根据景点名称从Unsplash获取图片"
+    description="根据景点名称和城市从 Wikimedia Commons 获取可用图片"
 )
-async def get_attraction_photo(name: str):
+async def get_attraction_photo(name: str, city: str = ""):
     """
     获取景点图片
 
@@ -104,23 +105,25 @@ async def get_attraction_photo(name: str):
         图片URL
     """
     try:
-        unsplash_service = get_unsplash_service()
-
-        # 搜索景点图片(requests 是阻塞调用,放到线程池避免阻塞事件循环)
-        photo_url = await asyncio.to_thread(
-            unsplash_service.get_photo_url, f"{name} China landmark"
-        )
-
-        if not photo_url:
-            # 如果没找到,尝试只用景点名称搜索
-            photo_url = await asyncio.to_thread(unsplash_service.get_photo_url, name)
+        photo_service = get_wikimedia_photo_service()
+        # requests 是阻塞调用;限制并发,避免一次加载多张图时打满上游。
+        async with _photo_request_semaphore:
+            photo = await asyncio.to_thread(
+                photo_service.get_photo,
+                name,
+                city,
+            )
 
         return {
             "success": True,
-            "message": "获取图片成功",
+            "message": "获取图片成功" if photo else "未找到可用图片",
             "data": {
                 "name": name,
-                "photo_url": photo_url
+                "city": city,
+                "photo_url": photo.url if photo else None,
+                "provider": photo.provider if photo else "",
+                "source_url": photo.source_url if photo else "",
+                "title": photo.title if photo else "",
             }
         }
 
