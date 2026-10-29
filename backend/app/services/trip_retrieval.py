@@ -148,6 +148,7 @@ async def _enrich(
                 "rating": detail.get("rating") or "",
                 "cost": _cost_text(detail.get("cost")),
                 "opentime": detail.get("opentime2") or detail.get("opentime") or "",
+                "poi_id": poi.id,
             }
         )
 
@@ -215,6 +216,7 @@ def _render_attractions(items: Sequence[Dict[str, Any]]) -> str:
                     f"评分 {item['rating']}" if item["rating"] else "",
                     f"门票 {item['cost']}" if item["cost"] else "",
                     f"开放时间 {item['opentime']}" if item["opentime"] else "",
+                    f"POI ID {item['poi_id']}" if item.get("poi_id") else "",
                     distance_text,
                 ]
             )

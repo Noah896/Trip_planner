@@ -136,7 +136,8 @@ class TestOptionalPreferencePrompt:
     def test_prompt_requires_one_time_preference_confirmation(self):
         prompt = chat_service.CHAT_SYSTEM_PROMPT
 
-        assert "一次性注意事项确认" in prompt
+        assert "分阶段追问" in prompt
+        assert "目的地未确定" in prompt
         assert "同行人、饮食忌口" in prompt
         assert "不要照抄固定句式" in prompt
         assert "后续任何回复都不得再次询问" in prompt
@@ -285,6 +286,7 @@ class TestScopeConstraints:
 
         assert "只能用上面提供的信息" in PLANNER_AGENT_PROMPT
         assert "只覆盖**中国大陆**" in PLANNER_AGENT_PROMPT
+        assert "必须原样复制到 `poi_id`" in PLANNER_AGENT_PROMPT
 
     def test_prompt_does_not_block_helping_without_a_city(self):
         """回归:曾经写过"用户没说城市时不要自己挑一个,应该追问",
@@ -433,7 +435,8 @@ class TestStreamingReply:
     def test_decision_is_still_parsed_from_full_args(self):
         raw = (
             '{"intent": "plan", "reply": "好的，北京 3 天", "city": "北京",'
-            ' "travel_days": "三天", "preferences": ["历史文化"], "missing": []}'
+            ' "start_date": "2026-10-16", "travel_days": "三天",'
+            ' "preferences": ["历史文化"], "missing": []}'
         )
         items = _stream(_tool_model(raw))
 
@@ -442,7 +445,7 @@ class TestStreamingReply:
         assert decision.city == "北京"
         assert decision.travel_days == 3  # 容错校验照旧生效
 
-    def test_clarify_for_known_city_also_asks_optional_preferences(self):
+    def test_clarify_for_known_city_does_not_ask_optional_preferences_yet(self):
         raw = (
             '{"intent": "clarify", "reply": "请问什么时候出发、计划玩几天?",'
             ' "city": "成都", "missing": ["出发日期", "行程天数"]}'
@@ -452,9 +455,44 @@ class TestStreamingReply:
         decision = items[-1]["decision"]
         assert decision.intent == "clarify"
         assert "什么时候出发" in decision.reply
-        assert chat_service._PREFERENCE_QUESTION_PATTERN.search(decision.reply)
-        assert any("注意事项" in item for item in decision.missing)
+        assert not chat_service._PREFERENCE_QUESTION_PATTERN.search(decision.reply)
+        assert not any("注意事项" in item for item in decision.missing)
         assert items[-1]["streamed"] == decision.reply
+
+    def test_missing_destination_is_sanitized_before_streaming(self):
+        raw = (
+            '{"intent": "clarify", "reply": "北方很大，大概什么时候出发、玩几天？",'
+            ' "missing": ["目的地", "出发日期"]}'
+        )
+
+        items = _stream(
+            _tool_model(raw),
+            message="我想去北方玩",
+        )
+        text = "".join(item["delta"] for item in items if "delta" in item)
+        decision = items[-1]["decision"]
+
+        assert text == decision.reply
+        assert "什么时候" not in text
+        assert "几天" not in text
+        assert "哪座城市" in text
+        assert decision.missing == ["目的地"]
+
+    def test_known_city_missing_time_strips_optional_questions(self):
+        raw = (
+            '{"intent": "clarify", "reply": "什么时候出发、玩几天？'
+            '顺便问问同行人、饮食忌口。", "city": "成都",'
+            ' "missing": ["出发日期", "行程天数", "注意事项"]}'
+        )
+
+        decision = _stream(
+            _tool_model(raw),
+            message="我想去成都",
+        )[-1]["decision"]
+
+        assert "什么时候出发" in decision.reply
+        assert not chat_service._PREFERENCE_QUESTION_PATTERN.search(decision.reply)
+        assert decision.missing == ["出发日期", "行程天数"]
 
     def test_missing_city_does_not_ask_diet_or_companions_yet(self):
         raw = (

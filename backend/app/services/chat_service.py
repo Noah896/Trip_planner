@@ -197,7 +197,7 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 **intent 只能取四个值:**
 - `plan`:信息够了,可以直接生成行程(至少要有城市 + 一段明确时间)
 - `refine`:上下文里有「上一版行程」,用户是在修改它(如"第二天换成博物馆")
-- `clarify`:缺关键信息,需要追问(没说时间/天数,或还没确认同行人与注意事项)
+- `clarify`:缺关键信息,需要按「目的地 -> 时间 -> 注意事项」的顺序追问
 - `chat`:用户在闲聊、或问一次性问题(如"你能做什么""介绍一下你自己")
 
 **范围约束(重要,必须遵守):**
@@ -229,7 +229,8 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 但**绝对不要每次都推荐同样的几个地方** —— 实测踩过这个坑:
 格式示例被当成答案照抄,结果不管谁来问,推荐永远是那四个。
 
-给完选项后补一句"想排成完整行程的话,告诉我选哪个、大概什么时候去"即可。
+给完选项后只需问“你想先去哪座城市”,**不要同时追问时间或天数**。
+用户确认城市后才进入时间确认阶段。
 **在这里重复追问是最糟的回应。**
 
 **抽取规则:**
@@ -259,23 +260,31 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
    漏了的话下游检索不到它,规划就会把用户选的景点当成普通候选、甚至排掉。
    注意区分:`must_visit` 是"一定要去的具体地点",`preferences` 只是"偏好类型"。
 
-**一次性注意事项确认(重要):**
+**分阶段追问(硬性规则,重要):**
 
-当用户已经明确目的地,但还没有开始规划时,除了日期和天数,也要顺手确认一次
-**同行人、饮食忌口、行动便利性、节奏偏好、必去地点**等注意事项。
+一次只推进一个阶段,不得把后续阶段的问题提前混进来:
+
+0. **目的地未确定**(如"去北方""想逛古城""随便推荐"):
+   - 只推荐或确认**具体城市**;
+   - 不得询问出发日期、天数、同行人、饮食忌口、行动便利性或节奏;
+   - 即使已有对话历史,也不要把“什么时候去、玩几天”作为本轮追问。
+1. **目的地已确定,但日期/天数不全**:
+   - 只问缺少的时间和天数;
+   - 不得询问同行人、饮食忌口、行动便利性、节奏或必去地点。
+2. **城市、日期、天数都齐全,但还没开始规划**:
+   - 此时才一次性确认一次**同行人、饮食忌口、行动便利性、节奏偏好、必去地点**。
 
 本轮表达风格提示:**{preference_style}**。只表达相同的语义,
 不要照抄固定句式,不要每次都使用同一种结尾。
 
-1. 如果缺日期或天数,`intent=clarify`。回复里必须同时问清缺的必填项
-   **和**注意事项,但措辞、语序、长短应自然变化,不需要列出完全相同的固定清单。
-2. 如果城市、日期、天数都已齐全,但用户没提供任何偏好/注意事项,
+1. 如果城市未确定,`intent=clarify` 且 `missing` 只列目的地;回复只问目的地。
+2. 如果城市已确定但缺日期或天数,`intent=clarify`;回复只问缺少的时间和天数。
+3. 如果城市、日期、天数都已齐全,但用户没提供任何偏好/注意事项,
    并且历史里还没问过这件事:仍然先返回 `clarify`,做这一轮一次性确认。
-3. 如果用户回答"没有特别要求""按默认安排""都可以",或者已经提供任意偏好,
+4. 如果用户回答"没有特别要求""按默认安排""都可以",或者已经提供任意偏好,
    就直接进入 `plan`,**不要重复追问**。
-4. **只要历史消息里已经问过注意事项,后续任何回复都不得再次询问同一组内容**。
+5. **只要历史消息里已经问过注意事项,后续任何回复都不得再次询问同一组内容**。
    用户聊景点、修改条件或补充日期时都不要复读;如果因此已具备规划条件,直接 `plan`。
-5. 只有城市都还没确定时,不要急着问饮食和同行人;先把目的地问清。
 6. 如果本轮已经抽到 `带小孩 / 带老人 / 不吃辣` 等任意偏好,视为注意事项已回答,
    **绝不能在同一轮再问一遍**。
 7. `clarify` 只用于真正缺失的关键信息。返程日期可由出发日 + 天数推导,
@@ -308,7 +317,8 @@ CHAT_SYSTEM_PROMPT = """你是「智能旅行规划助手」的对话入口。�
 - intent=clarify:把缺的信息一次问清,别挤牙膏;
 - intent=chat:直接回应。
 
-**missing 字段**:intent=clarify 时列出还缺的信息(中文,如 "出发日期"、"行程天数")。
+**missing 字段**:intent=clarify 时只列当前阶段缺的信息。目的地未定时只写
+"目的地";目的地已定时只列缺失的 "出发日期" / "行程天数";注意事项不能提前列入。
 """
 
 # 随机示例池:每次抽几条塞进提示词当"格式示例"。
@@ -382,6 +392,7 @@ def reset_router_agent() -> None:
 # 从**还没写完**的 JSON 片段里抠出 reply 的当前值。
 # 模型的工具参数是按字段顺序吐的,而 reply 是第二个字段 —— 所以它出现得很早。
 _REPLY_PATTERN = re.compile(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)')
+_INTENT_PATTERN = re.compile(r'"intent"\s*:\s*"([^"]*)"')
 
 
 def _decode_partial_string(fragment: str) -> str:
@@ -405,6 +416,18 @@ def extract_reply(raw_args: str) -> str:
     return _decode_partial_string(match.group(1)) if match else ""
 
 
+def extract_intent(raw_args: str) -> str:
+    """取出已经完整输出的 intent，用于决定是否延迟澄清回复。"""
+    match = _INTENT_PATTERN.search(raw_args)
+    if not match:
+        return ""
+    text = match.group(1).strip().lower()
+    for name in ("refine", "plan", "clarify", "chat"):
+        if name in text:
+            return name
+    return ""
+
+
 def _normalize_escapes(text: str) -> str:
     """把**字面量的** ``\\n`` / ``\\t`` 还原成真正的换行和制表符。
 
@@ -419,13 +442,12 @@ def _normalize_escapes(text: str) -> str:
 
 
 _FALLBACK_REPLY = (
-    "抱歉,我刚才没太理解。你可以直接告诉我:想去哪个城市、大概什么时候出发、玩几天,"
-    "有没有同行老人/小孩、饮食忌口等注意事项,比如「北京玩三天,下周末出发,带小孩、不吃辣」。"
+    "抱歉,我刚才没太理解。你现在最想去哪座城市？先确定目的地,我再帮你确认时间和安排。"
 )
 
 
 def _fallback_decision() -> ChatDecision:
-    return ChatDecision(intent="clarify", reply=_FALLBACK_REPLY, missing=["目的地", "出发日期"])
+    return ChatDecision(intent="clarify", reply=_FALLBACK_REPLY, missing=["目的地"])
 
 
 OPTIONAL_PREFERENCE_QUESTIONS = (
@@ -456,6 +478,13 @@ _OPTIONAL_DECLINED_PATTERN = re.compile(
     r"(没有(特别|其他|什么|啥)?要求|没啥要求|无特殊要求|没有忌口|没忌口|"
     r"按默认|默认安排|都可以|随意安排|不用特别安排)"
 )
+_TIME_QUESTION_PATTERN = re.compile(
+    r"(什么时候|哪天|哪一天|几号|几日|几天|多久|多长时间|"
+    r"出发(?:日期|时间)?|返程|行程天数|玩到)"
+)
+_CITY_QUESTION_PATTERN = re.compile(
+    r"(哪座城市|哪个城市|哪一座|哪座|想去哪|去哪里|去哪儿|选哪个|目的地)"
+)
 
 
 def _preference_question_was_asked(history: Sequence[ChatMessage]) -> bool:
@@ -483,6 +512,92 @@ def _has_explicit_optional_preferences(decision: ChatDecision) -> bool:
     )
 
 
+def _time_fields_complete(decision: ChatDecision) -> bool:
+    """日期区间、出发日+天数、返程日+天数任一组合都足够。"""
+    start = _parse_date(decision.start_date)
+    end = _parse_date(decision.end_date)
+    days = decision.travel_days
+    return bool(
+        (start and end)
+        or (start and days and days > 0)
+        or (end and days and days > 0)
+    )
+
+
+def _missing_time_labels(decision: ChatDecision) -> List[str]:
+    start = _parse_date(decision.start_date)
+    end = _parse_date(decision.end_date)
+    days = decision.travel_days
+    if (start and end) or (days and (start or end)):
+        return []
+    missing = []
+    if not start and not end:
+        missing.append("出发日期")
+    if not days:
+        missing.append("行程天数")
+    return missing
+
+
+def _strip_staged_question_clauses(text: str, pattern: re.Pattern) -> str:
+    """按句和逗号删除某个阶段的追问，同时保留前面的有效推荐。"""
+    sentences = re.split(r"(?<=[。！？!?；;\n])", text or "")
+    kept_sentences = []
+    for sentence in sentences:
+        clauses = re.split(r"(?<=[，,])", sentence)
+        kept = "".join(clause for clause in clauses if not pattern.search(clause))
+        kept = kept.strip().rstrip("，,、；; ")
+        if kept:
+            kept_sentences.append(kept)
+    return "".join(kept_sentences).strip()
+
+
+def enforce_clarification_stage(decision: ChatDecision) -> ChatDecision:
+    """按目的地、时间、注意事项三阶段拆开追问。
+
+    模型即使越级生成了日期、同行人或忌口问题，也会在这里被删除。目的地
+    未确定时只保留城市选择；城市确定但时间不全时只保留时间问题。
+    """
+    if decision.intent not in {"clarify", "plan"}:
+        return decision
+
+    city = (decision.city or "").strip()
+    if not city:
+        reply = _strip_staged_question_clauses(
+            decision.reply,
+            re.compile(
+                rf"(?:{_TIME_QUESTION_PATTERN.pattern})|(?:{_PREFERENCE_QUESTION_PATTERN.pattern})"
+            ),
+        )
+        if not reply:
+            reply = "先确定目的地会更容易安排。"
+        if not _CITY_QUESTION_PATTERN.search(reply):
+            reply = reply.rstrip("。！？!?，,；;") + "。你想先去哪座城市？"
+        return decision.model_copy(
+            update={
+                "intent": "clarify",
+                "reply": reply,
+                "missing": ["目的地"],
+            }
+        )
+
+    if _time_fields_complete(decision):
+        return decision
+
+    reply = _strip_staged_question_clauses(
+        decision.reply, _PREFERENCE_QUESTION_PATTERN
+    )
+    if not reply or not _TIME_QUESTION_PATTERN.search(reply):
+        prefix = f"{reply.rstrip('。！？!?，,；;')}。" if reply else ""
+        reply = prefix + "你打算哪天出发、计划玩几天？"
+    return decision.model_copy(
+        update={
+            "intent": "clarify",
+            "reply": reply,
+            "missing": _missing_time_labels(decision),
+        }
+    )
+
+
 def enforce_optional_preference_check(
     decision: ChatDecision,
     message: str,
@@ -492,6 +607,8 @@ def enforce_optional_preference_check(
     if decision.intent not in {"clarify", "plan"}:
         return decision
     if not (decision.city or "").strip():
+        return decision
+    if not _time_fields_complete(decision):
         return decision
     if _has_explicit_optional_preferences(decision):
         return decision
@@ -903,6 +1020,8 @@ async def decide_streaming(
 
     raw_args = ""
     streamed = ""
+    stream_intent = ""
+    defer_reply_until_decision = False
 
     try:
         async for chunk in router.astream(payload):
@@ -911,6 +1030,14 @@ async def decide_streaming(
                 if not fragment:
                     continue
                 raw_args += fragment
+                detected_intent = extract_intent(raw_args)
+                if detected_intent and not stream_intent:
+                    stream_intent = detected_intent
+                    # 澄清回复必须先经过阶段规则再发给用户；否则一旦模型把
+                    # “什么时候去/玩几天”流出来，就无法撤回。
+                    defer_reply_until_decision = stream_intent == "clarify"
+                if not stream_intent or defer_reply_until_decision:
+                    continue
                 current = _normalize_escapes(extract_reply(raw_args))
                 # 末尾若是反斜杠,它可能只是**半个转义序列**(比如刚要吐 \n 里的那个 \),
                 # 先扣住不发 —— 否则等真正的换行到达时,文本就不再以它为前缀,
@@ -933,12 +1060,20 @@ async def decide_streaming(
     if decision is None:
         decision = _fallback_decision()
 
+    decision = enforce_clarification_stage(decision)
+
     # 模型很容易把"城市 + 时间"当成全部条件;这里做一次确定性兜底:
-    # 目的地明确后,同行人 / 忌口 / 节奏等注意事项只确认一次。
+    # 目的地和时间都明确后,同行人 / 忌口 / 节奏等注意事项只确认一次。
     decision = enforce_optional_preference_check(decision, message, history)
 
     # 把"最终决定要说的"和"已经流出去的"对齐:少了的补上,不看半句、也不重复。
     reply = _normalize_escapes(decision.reply or "")
+    if defer_reply_until_decision:
+        # 澄清轮通常只有一两句，先完整决策再按小块发送，兼顾可读性与可约束性。
+        for start in range(0, len(reply), 24):
+            yield {"delta": reply[start : start + 24]}
+        streamed = reply
+
     common = 0
     for said, want in zip(streamed, reply):
         if said != want:

@@ -183,7 +183,20 @@
               >
                 <template #renderItem="{ item, index }">
                   <a-list-item>
-                    <a-card :title="item.name" size="small" class="attraction-card">
+                    <a-card size="small" class="attraction-card">
+                      <template #title>
+                        <a
+                          class="attraction-title-link"
+                          :href="getAttractionInfoUrl(item, tripPlan.city)"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          :title="item.poi_id ? '打开高德地点详情' : '搜索景点官网和相关信息'"
+                          @click.stop
+                        >
+                          <span>{{ item.name }}</span>
+                          <span class="attraction-info-entry">查看信息 ↗</span>
+                        </a>
+                      </template>
                       <!-- 编辑模式下的操作按钮 -->
                       <template #extra v-if="editMode">
                         <a-space>
@@ -212,27 +225,41 @@
                       </template>
 
                       <!-- 景点图片 -->
-                      <div class="attraction-image-wrapper">
+                      <div
+                        class="attraction-image-wrapper"
+                        :class="{ 'has-photo': attractionPhotoLoaded[item.name] }"
+                      >
                         <img
-                          :src="getAttractionImage(item.name, index)"
-                          :alt="item.name"
-                          class="attraction-image"
-                          @error="handleImageError($event, item.name, index)"
+                          :src="getAttractionPlaceholderImage(item.name, index)"
+                          :alt="`${item.name}景点示意图`"
+                          class="attraction-image attraction-image-fallback"
+                          decoding="async"
                         />
-                        <div v-if="!attractionPhotos[item.name]" class="image-placeholder-label">
+                        <img
+                          v-if="attractionPhotos[item.name]"
+                          :src="attractionPhotos[item.name]"
+                          :alt="item.name"
+                          class="attraction-image attraction-image-real"
+                          loading="lazy"
+                          decoding="async"
+                          @load="handleImageLoad(item.name)"
+                          @error="handleImageError($event, item.name)"
+                        />
+                        <div
+                          v-if="!attractionPhotoLoaded[item.name]"
+                          class="image-placeholder-label"
+                        >
                           景点示意图
                         </div>
                         <a
-                          v-if="attractionPhotoMeta[item.name]?.source_url"
+                          v-if="attractionPhotoLoaded[item.name] && attractionPhotoMeta[item.name]?.source_url"
                           class="image-source-link"
                           :href="attractionPhotoMeta[item.name].source_url"
                           target="_blank"
                           rel="noopener noreferrer"
                           @click.stop
                         >
-                          {{ attractionPhotoMeta[item.name].scope === 'city'
-                            ? '图源 Wikimedia Commons · 城市风光'
-                            : '图源 Wikimedia Commons' }}
+                          图源 Wikimedia Commons
                         </a>
                         <div class="attraction-badge">
                           <span class="badge-number">{{ index + 1 }}</span>
@@ -360,7 +387,7 @@ import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import KnowledgeSources from '@/components/KnowledgeSources.vue'
 import MemoryReceipt from '@/components/MemoryReceipt.vue'
-import type { HistoryUsage, KnowledgeSource, TripPlan, UsedMemoryFact } from '@/types'
+import type { Attraction, HistoryUsage, KnowledgeSource, TripPlan, UsedMemoryFact } from '@/types'
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
@@ -379,10 +406,13 @@ interface AttractionPhotoMeta {
   source_url: string
   title: string
   scope: string
+  width: number
+  height: number
 }
 
 const attractionPhotos = ref<Record<string, string>>({})
 const attractionPhotoMeta = ref<Record<string, AttractionPhotoMeta>>({})
+const attractionPhotoLoaded = ref<Record<string, boolean>>({})
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
 let map: any = null
@@ -423,6 +453,15 @@ onMounted(async () => {
 
 const goBack = () => {
   router.push('/')
+}
+
+const getAttractionInfoUrl = (item: Attraction, city?: string): string => {
+  const poiId = item.poi_id?.trim()
+  if (poiId) {
+    return `https://www.amap.com/place/${encodeURIComponent(poiId)}`
+  }
+  const query = [item.name, city, '景点 官网 介绍'].filter(Boolean).join(' ')
+  return `https://www.baidu.com/s?wd=${encodeURIComponent(query)}`
 }
 
 // 滚动到指定区域
@@ -519,7 +558,7 @@ const loadAttractionPhotos = async () => {
 
   await Promise.allSettled(names.map(async name => {
     const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 25000)
+    const timeout = window.setTimeout(() => controller.abort(), 30000)
     try {
       const response = await fetch(
         `${baseUrl}/api/poi/photo?name=${encodeURIComponent(name)}&city=${encodeURIComponent(city)}`,
@@ -530,11 +569,14 @@ const loadAttractionPhotos = async () => {
       if (!data.success || !data.data?.photo_url) return
 
       attractionPhotos.value[name] = data.data.photo_url
+      attractionPhotoLoaded.value[name] = false
       attractionPhotoMeta.value[name] = {
         provider: data.data.provider || '',
         source_url: data.data.source_url || '',
         title: data.data.title || '',
-        scope: data.data.scope || 'attraction'
+        scope: data.data.scope || 'attraction',
+        width: Number(data.data.width || 0),
+        height: Number(data.data.height || 0)
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
@@ -546,14 +588,12 @@ const loadAttractionPhotos = async () => {
   }))
 }
 
-// 获取景点图片
-const getAttractionImage = (name: string, index: number): string => {
-  // 如果已加载真实图片,返回真实图片
-  if (attractionPhotos.value[name]) {
-    return attractionPhotos.value[name]
-  }
+const handleImageLoad = (name: string) => {
+  attractionPhotoLoaded.value[name] = true
+}
 
-  // 返回一个纯色占位图(避免跨域问题)
+// 本地矢量示意图始终先渲染，远程图片加载失败时不会出现空白。
+const getAttractionPlaceholderImage = (name: string, index: number): string => {
   const colors = [
     { start: '#667eea', end: '#764ba2' },
     { start: '#f093fb', end: '#f5576c' },
@@ -569,33 +609,32 @@ const getAttractionImage = (name: string, index: number): string => {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500">
     <defs>
       <linearGradient id="grad${index}" x1="0%" y1="0%" x2="100%" y2="100%">
         <stop offset="0%" style="stop-color:${start};stop-opacity:1" />
         <stop offset="100%" style="stop-color:${end};stop-opacity:1" />
       </linearGradient>
     </defs>
-    <rect width="400" height="300" fill="url(#grad${index})"/>
-    <circle cx="200" cy="108" r="42" fill="rgba(255,255,255,0.16)"/>
-    <path d="M152 160 L188 116 L216 146 L238 128 L264 160 Z" fill="rgba(255,255,255,0.88)"/>
-    <circle cx="236" cy="102" r="12" fill="rgba(255,255,255,0.9)"/>
-    <text x="50%" y="205" text-anchor="middle" font-family="sans-serif" font-size="24" font-weight="bold" fill="white">${escapedName}</text>
-    <text x="50%" y="238" text-anchor="middle" font-family="sans-serif" font-size="14" fill="rgba(255,255,255,0.82)">旅行景点示意图</text>
+    <rect width="800" height="500" fill="url(#grad${index})"/>
+    <circle cx="400" cy="180" r="70" fill="rgba(255,255,255,0.16)"/>
+    <path d="M300 280 L370 200 L430 250 L480 215 L540 280 Z" fill="rgba(255,255,255,0.88)"/>
+    <circle cx="485" cy="170" r="20" fill="rgba(255,255,255,0.9)"/>
+    <text x="50%" y="355" text-anchor="middle" font-family="sans-serif" font-size="38" font-weight="bold" fill="white">${escapedName}</text>
+    <text x="50%" y="405" text-anchor="middle" font-family="sans-serif" font-size="22" fill="rgba(255,255,255,0.82)">旅行景点示意图</text>
   </svg>`
 
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
 }
 
-// 图片加载失败时的处理
-const handleImageError = (event: Event, name: string, index: number) => {
+// 图片加载失败时退回始终存在的本地示意图。
+const handleImageError = (event: Event, name: string) => {
   const img = event.target as HTMLImageElement
+  img.removeAttribute('src')
   delete attractionPhotos.value[name]
   delete attractionPhotoMeta.value[name]
-  img.src = getAttractionImage(name, index)
+  attractionPhotoLoaded.value[name] = false
 }
-
-
 
 // 导出为图片
 const exportAsImage = async () => {
@@ -1106,7 +1145,23 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   width: 100%;
   height: 200px;
   object-fit: cover;
-  transition: transform 0.3s ease;
+  transition: opacity 0.25s ease, transform 0.3s ease;
+}
+
+.attraction-image-fallback {
+  position: relative;
+  z-index: 0;
+}
+
+.attraction-image-real {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  opacity: 0;
+}
+
+.attraction-image-wrapper.has-photo .attraction-image-real {
+  opacity: 1;
 }
 
 .image-placeholder-label,
@@ -1120,6 +1175,7 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   color: #fff;
   font-size: 11px;
   line-height: 1.4;
+  z-index: 2;
 }
 
 .image-source-link {
@@ -1134,10 +1190,34 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   transform: scale(1.05);
 }
 
+.attraction-title-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.attraction-title-link:hover {
+  color: #fff;
+}
+
+.attraction-info-entry {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.9;
+}
+
 .attraction-badge {
   position: absolute;
   top: 12px;
   left: 12px;
+  z-index: 3;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
   width: 36px;
@@ -1158,6 +1238,7 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   position: absolute;
   top: 12px;
   right: 12px;
+  z-index: 3;
   background: rgba(255, 77, 79, 0.9);
   color: white;
   padding: 4px 12px;

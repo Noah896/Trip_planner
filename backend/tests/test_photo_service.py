@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 from fastapi.testclient import TestClient
 
 from app.api.main import app
@@ -88,51 +90,114 @@ def test_wikimedia_service_caches_no_match(monkeypatch):
 
     assert service.get_photo("不存在的地方", "郴州") is None
     assert service.get_photo("不存在的地方", "郴州") is None
-    # 第一次查景点和城市风光各一次;第二次两级缓存都命中。
-    assert len(calls) == 2
+    # 精确景点未命中时不再拿城市风光冒充;第二次请求走缓存。
+    assert len(calls) == 1
 
 
-def test_wikimedia_service_falls_back_to_city_scenery(monkeypatch):
+def test_wikimedia_service_does_not_substitute_city_scenery(monkeypatch):
     service = WikimediaPhotoService()
     service.curl_path = None
-    responses = [
-        _Response({"query": {"pages": {}}}),
-        _Response(
-            {
-                "query": {
-                    "pages": {
-                        "3": {
-                            "index": 1,
-                            "title": "File:Chenzhou scenery.jpg",
-                            "imageinfo": [
-                                {
-                                    "mime": "image/jpeg",
-                                    "thumburl": (
-                                        "https://thumb.wikimedia.org/"
-                                        "chenzhou-scenery.jpg"
-                                    ),
-                                    "descriptionurl": (
-                                        "https://commons.wikimedia.org/wiki/"
-                                        "File:Chenzhou_scenery.jpg"
-                                    ),
-                                }
-                            ],
-                        }
-                    }
-                }
-            }
-        ),
-    ]
+    calls = []
+
+    def _get(*args, **kwargs):
+        calls.append(args)
+        return _Response({"query": {"pages": {}}})
+
     monkeypatch.setattr(
         "app.services.wikimedia_photo_service.requests.get",
-        lambda *args, **kwargs: responses.pop(0),
+        _get,
     )
 
     photo = service.get_photo("五岭阁", "郴州")
 
+    assert photo is None
+    assert len(calls) == 1
+
+
+def test_rejects_artwork_and_prefers_high_resolution_photo(monkeypatch):
+    service = WikimediaPhotoService()
+    service.curl_path = None
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "index": 1,
+                    "title": "File:北京故宫博物院藏职贡图卷.jpg",
+                    "imageinfo": [
+                        {
+                            "mime": "image/jpeg",
+                            "width": 3200,
+                            "height": 2100,
+                            "thumburl": (
+                                "https://thumb.wikimedia.org/"
+                                "painting-1600.jpg"
+                            ),
+                        }
+                    ],
+                },
+                "2": {
+                    "index": 2,
+                    "title": "File:Forbidden City Shenwumen Gate.JPG",
+                    "imageinfo": [
+                        {
+                            "mime": "image/jpeg",
+                            "width": 1800,
+                            "height": 1200,
+                            "thumburl": (
+                                "https://thumb.wikimedia.org/"
+                                "forbidden-city-1600.jpg"
+                            ),
+                            "descriptionurl": (
+                                "https://commons.wikimedia.org/wiki/"
+                                "File:Forbidden_City_Shenwumen_Gate.JPG"
+                            ),
+                        }
+                    ],
+                },
+                "3": {
+                    "index": 3,
+                    "title": "File:Forbidden City small.jpg",
+                    "imageinfo": [
+                        {
+                            "mime": "image/jpeg",
+                            "width": 400,
+                            "height": 260,
+                            "thumburl": (
+                                "https://thumb.wikimedia.org/"
+                                "forbidden-city-small.jpg"
+                            ),
+                        }
+                    ],
+                },
+            }
+        }
+    }
+    monkeypatch.setattr(
+        "app.services.wikimedia_photo_service.requests.get",
+        lambda *args, **kwargs: _Response(payload),
+    )
+
+    photo = service.get_photo("故宫博物院", "北京")
+
     assert photo is not None
-    assert photo.scope == "city"
-    assert photo.title == "Chenzhou scenery.jpg"
+    assert photo.title == "Forbidden City Shenwumen Gate.JPG"
+    assert photo.width == 1800
+    assert photo.height == 1200
+    assert "forbidden-city-1600" in photo.url
+
+
+def test_curl_timeout_degrades_to_no_photo(monkeypatch):
+    service = WikimediaPhotoService(curl_path="curl")
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="curl", timeout=25)
+
+    monkeypatch.setattr(
+        "app.services.wikimedia_photo_service.subprocess.run",
+        _timeout,
+    )
+
+    assert service.get_photo("天坛公园", "北京") is None
 
 
 def test_photo_route_returns_metadata(monkeypatch):

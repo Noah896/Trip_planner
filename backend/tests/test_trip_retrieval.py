@@ -433,3 +433,21 @@ class TestSmallHelpers:
             ]
         )
         assert text == "1. 天坛公园 / 经纬度 116.4121,39.882"
+
+    def test_render_includes_poi_id_for_detail_link(self):
+        text = trip_retrieval._render_attractions(
+            [
+                {
+                    "name": "湖南省植物园",
+                    "address": "植物园路111号",
+                    "location": "113.02,28.11",
+                    "type": "风景名胜",
+                    "rating": "4.7",
+                    "cost": "",
+                    "opentime": "",
+                    "poi_id": "B000TEST",
+                }
+            ]
+        )
+
+        assert "POI ID B000TEST" in text

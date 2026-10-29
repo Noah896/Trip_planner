@@ -13,6 +13,7 @@ export interface Attraction {
   description: string
   category?: string
   rating?: number
+  poi_id?: string
   image_url?: string
   ticket_price?: number
 }

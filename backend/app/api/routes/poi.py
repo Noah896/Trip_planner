@@ -125,6 +125,8 @@ async def get_attraction_photo(name: str, city: str = ""):
                 "source_url": photo.source_url if photo else "",
                 "title": photo.title if photo else "",
                 "scope": photo.scope if photo else "",
+                "width": photo.width if photo else 0,
+                "height": photo.height if photo else 0,
             }
         }
 
