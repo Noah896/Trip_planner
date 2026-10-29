@@ -167,6 +167,7 @@ POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同�
 | 三路实时检索(确定性,不经过模型) | `app/services/trip_retrieval.py` |
 | 公共知识 RAG(BGE + FAISS + BM25 + RRF) | `app/rag/` |
 | 聊天入口(意图 + 槽位 + 事件流) | `app/services/chat_service.py` |
+| 景点官网解析与介绍页兜底 | `app/services/attraction_info_service.py` · `app/api/routes/poi.py` |
 | 流式进度(SSE 端点 + 前端消费) | `app/api/routes/trip.py` · `frontend/src/views/Home.vue` |
 | 高德 MCP 连接与常驻 Server 生命周期 | `app/services/amap_mcp.py` |
 | LLM 客户端(含 thinking 开关) | `app/services/llm_service.py` |
@@ -184,7 +185,36 @@ POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同�
 
 ## 4. 进度日志
 
+### 2026-10-29(修复:景点信息入口改为官网优先)
+
+用户进一步明确“查看信息”应进入景点官网或同类介绍页,而不是高德地图。
+上一轮高德坐标 URI 修复解决了定位回落到当前地址的问题,但产品入口仍不符合预期,
+本轮已将信息入口从地图链接替换为官网解析链接。
+
+**实现:**
+
+1. 新增 `AttractionInfoService`,按“景点名 + 城市 + 官网”搜索候选;
+2. 只接受标题包含景点名、并且带官网提示或同一官网域名重复出现的候选;
+3. 过滤高德、百科、OTA、本地宝、知乎、小红书等聚合或票务站点;
+4. 官网统一归一到站点首页;找不到可信官网时回退到“景点名 + 城市 + 官网 +
+   介绍”的搜索页;
+5. 官网成功结果缓存 24 小时,搜索兜底缓存 10 分钟;外部解析异常不会阻塞点击;
+6. 新增 `GET /api/poi/official-site?name=...&city=...`,后端直接 307 跳转;
+7. 结果页按钮改为“官网/介绍 ↗”,直接指向该接口,不再打开高德地图。
+
+**验证:**
+
+1. 官网解析、POI 回填和检索专项 **26 passed**;
+2. 后端全量 **320 passed / 1 skipped**;
+3. 前端 `npm run build` 通过;
+4. 真实接口:湖南省植物园返回 `http://www.hnfbg.cn/`;洋湖国家湿地公园
+   没有可信官网,正确回退到介绍搜索页;
+5. 无头 Edge 从结果页点击链路实际进入湖南省植物园官网,页面标题和正文均包含
+   景点名称。
+
 ### 2026-10-29(修复:高德“查看信息”回落到当前地址)
+
+> 后续用户明确要求进入官网,因此本节的坐标 URI 方案已被上方“官网优先”方案取代。
 
 用户点击景点“查看信息”后,高德网页只定位到当前地址。实测旧链接
 `https://www.amap.com/place/{poi_id}` 会跳到 `/ssr/place/{poi_id}`,随后
@@ -266,8 +296,7 @@ https://uri.amap.com/marker?position={longitude},{latitude}&name={name}
 
 **当前运行状态:**
 
-- 后端 `0.0.0.0:8000`,PID `2312`(启动器 `11372`);
-  MCP `0.0.0.0:8001`,PID `52732`;
+- 后端 `0.0.0.0:8000`,PID `45036`(启动器 `50140`);MCP 在首次规划时按需启动;
 - Vite `[::1]:5173`,PID `58700`;浏览器继续使用 `http://localhost:5173`。
 - 后端日志:`%TEMP%\trip_planner_8000\out.log` / `err.log`;
 - 前端日志:`%TEMP%\trip_planner_5173\out.log` / `err.log`。

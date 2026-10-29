@@ -2,10 +2,12 @@
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from ...services.amap_service import get_amap_service
+from ...services.attraction_info_service import get_attraction_info_service
 from ...services.wikimedia_photo_service import get_wikimedia_photo_service
 
 router = APIRouter(prefix="/poi", tags=["POI"])
@@ -17,6 +19,31 @@ class POIDetailResponse(BaseModel):
     success: bool
     message: str
     data: Optional[dict] = None
+
+
+@router.get(
+    "/official-site",
+    summary="打开景点官网或介绍页",
+    description=(
+        "优先解析并跳转到景点官网；找不到可信官网时跳转到该景点的搜索介绍页。"
+    ),
+)
+def open_attraction_official_site(
+    name: str = Query(..., min_length=1, max_length=100),
+    city: str = Query(default="", max_length=64),
+):
+    clean_name = " ".join(name.split())
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="景点名称不能为空")
+    info = get_attraction_info_service().resolve(clean_name, " ".join(city.split()))
+    return RedirectResponse(
+        url=info.url,
+        status_code=307,
+        headers={
+            "Cache-Control": "public, max-age=600",
+            "X-Attraction-Info-Source": info.source,
+        },
+    )
 
 
 @router.get(

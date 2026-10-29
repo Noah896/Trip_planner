@@ -190,11 +190,11 @@
                           :href="getAttractionInfoUrl(item, tripPlan.city)"
                           target="_blank"
                           rel="noopener noreferrer"
-                          :title="item.location ? '在高德地图中定位该景点' : '搜索景点官网和相关信息'"
+                          :title="'打开景点官网或介绍页'"
                           @click.stop
                         >
                           <span>{{ item.name }}</span>
-                          <span class="attraction-info-entry">查看信息 ↗</span>
+                          <span class="attraction-info-entry">官网/介绍 ↗</span>
                         </a>
                       </template>
                       <!-- 编辑模式下的操作按钮 -->
@@ -413,6 +413,7 @@ interface AttractionPhotoMeta {
 const attractionPhotos = ref<Record<string, string>>({})
 const attractionPhotoMeta = ref<Record<string, AttractionPhotoMeta>>({})
 const attractionPhotoLoaded = ref<Record<string, boolean>>({})
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
 let map: any = null
@@ -456,20 +457,9 @@ const goBack = () => {
 }
 
 const getAttractionInfoUrl = (item: Attraction, city?: string): string => {
-  const longitude = Number(item.location?.longitude)
-  const latitude = Number(item.location?.latitude)
-  if (Number.isFinite(longitude) && Number.isFinite(latitude)) {
-    const params = new URLSearchParams({
-      position: `${longitude},${latitude}`,
-      name: item.name,
-      coordinate: 'gaode',
-      callnative: '0',
-      src: 'helloagents_trip_planner'
-    })
-    return `https://uri.amap.com/marker?${params.toString()}`
-  }
-  const query = [item.name, city, '景点 官网 介绍'].filter(Boolean).join(' ')
-  return `https://www.baidu.com/s?wd=${encodeURIComponent(query)}`
+  const params = new URLSearchParams({ name: item.name })
+  if (city) params.set('city', city)
+  return `${apiBaseUrl}/api/poi/official-site?${params.toString()}`
 }
 
 // 滚动到指定区域
@@ -562,14 +552,12 @@ const loadAttractionPhotos = async () => {
   const names = Array.from(new Set(
     tripPlan.value.days.flatMap(day => day.attractions.map(item => item.name))
   ))
-  const baseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
-
   await Promise.allSettled(names.map(async name => {
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), 30000)
     try {
       const response = await fetch(
-        `${baseUrl}/api/poi/photo?name=${encodeURIComponent(name)}&city=${encodeURIComponent(city)}`,
+        `${apiBaseUrl}/api/poi/photo?name=${encodeURIComponent(name)}&city=${encodeURIComponent(city)}`,
         { signal: controller.signal }
       )
       if (!response.ok) return
