@@ -190,7 +190,7 @@
                           :href="getAttractionInfoUrl(item, tripPlan.city)"
                           target="_blank"
                           rel="noopener noreferrer"
-                          :title="item.poi_id ? '打开高德地点详情' : '搜索景点官网和相关信息'"
+                          :title="item.location ? '在高德地图中定位该景点' : '搜索景点官网和相关信息'"
                           @click.stop
                         >
                           <span>{{ item.name }}</span>
@@ -456,9 +456,17 @@ const goBack = () => {
 }
 
 const getAttractionInfoUrl = (item: Attraction, city?: string): string => {
-  const poiId = item.poi_id?.trim()
-  if (poiId) {
-    return `https://www.amap.com/place/${encodeURIComponent(poiId)}`
+  const longitude = Number(item.location?.longitude)
+  const latitude = Number(item.location?.latitude)
+  if (Number.isFinite(longitude) && Number.isFinite(latitude)) {
+    const params = new URLSearchParams({
+      position: `${longitude},${latitude}`,
+      name: item.name,
+      coordinate: 'gaode',
+      callnative: '0',
+      src: 'helloagents_trip_planner'
+    })
+    return `https://uri.amap.com/marker?${params.toString()}`
   }
   const query = [item.name, city, '景点 官网 介绍'].filter(Boolean).join(' ')
   return `https://www.baidu.com/s?wd=${encodeURIComponent(query)}`
@@ -1611,4 +1619,3 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   }
 }
 </style>
-

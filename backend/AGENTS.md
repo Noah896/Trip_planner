@@ -184,6 +184,28 @@ POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同�
 
 ## 4. 进度日志
 
+### 2026-10-29(修复:高德“查看信息”回落到当前地址)
+
+用户点击景点“查看信息”后,高德网页只定位到当前地址。实测旧链接
+`https://www.amap.com/place/{poi_id}` 会跳到 `/ssr/place/{poi_id}`,随后
+`getPoiInfo` 请求命中高德网页风控;景点信息获取失败后,页面回落到 IP 所在地。
+`/detail/{poi_id}` 同样会被验证码拦截。上一轮只验证了前端生成的 href,没有验证
+高德页面最终定位,因此没发现这个问题。
+
+**修复:** 结果页优先用景点坐标生成高德 URI API 链接:
+
+```
+https://uri.amap.com/marker?position={longitude},{latitude}&name={name}
+&coordinate=gaode&callnative=0&src=helloagents_trip_planner
+```
+
+坐标缺失时才退回“景点名 + 城市 + 官网 介绍”的搜索链接。`callnative=0`
+保证在浏览器内打开,不强制唤起本地高德客户端。
+
+**验证:** `npm run build` 通过;无头 Edge 从结果页读取生成链接并实际导航,
+最终落到 `https://ditu.amap.com/regeo?...` 且页面包含“湖南省植物园”,
+坐标保持 `113.02,28.11`。
+
 ### 2026-10-29(已完成:景点图片继续修正 + 景点信息入口)
 
 > 本轮已完成实现、离线回归、真实长沙规划和结果页无头浏览器验证。
