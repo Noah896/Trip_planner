@@ -1,6 +1,7 @@
 """POI相关API路由"""
 
 import asyncio
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
@@ -21,6 +22,16 @@ class POIDetailResponse(BaseModel):
     data: Optional[dict] = None
 
 
+def _safe_fallback_url(value: str) -> str:
+    """Only allow same-site frontend paths, never an open redirect."""
+    if not value.startswith("/") or value.startswith("//"):
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme or parsed.netloc or "\r" in value or "\n" in value:
+        return ""
+    return value
+
+
 @router.get(
     "/official-site",
     summary="打开景点官网或介绍页",
@@ -31,13 +42,17 @@ class POIDetailResponse(BaseModel):
 def open_attraction_official_site(
     name: str = Query(..., min_length=1, max_length=100),
     city: str = Query(default="", max_length=64),
+    fallback: str = Query(default="", max_length=2048),
 ):
     clean_name = " ".join(name.split())
     if not clean_name:
         raise HTTPException(status_code=400, detail="景点名称不能为空")
     info = get_attraction_info_service().resolve(clean_name, " ".join(city.split()))
+    destination = info.url
+    if info.source != "official":
+        destination = _safe_fallback_url(fallback) or info.url
     return RedirectResponse(
-        url=info.url,
+        url=destination,
         status_code=307,
         headers={
             "Cache-Control": "public, max-age=600",

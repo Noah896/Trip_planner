@@ -456,8 +456,24 @@ const goBack = () => {
   router.push('/')
 }
 
+const getAttractionInfoFallbackUrl = (item: Attraction, city?: string): string => {
+  const params = new URLSearchParams({
+    name: item.name,
+    address: item.address || '',
+    description: item.description || '',
+    visit_duration: String(item.visit_duration || '')
+  })
+  if (city) params.set('city', city)
+  if (item.category) params.set('category', item.category)
+  if (item.rating != null) params.set('rating', String(item.rating))
+  return `/attraction-info?${params.toString()}`
+}
+
 const getAttractionInfoUrl = (item: Attraction, city?: string): string => {
-  const params = new URLSearchParams({ name: item.name })
+  const params = new URLSearchParams({
+    name: item.name,
+    fallback: getAttractionInfoFallbackUrl(item, city)
+  })
   if (city) params.set('city', city)
   return `${apiBaseUrl}/api/poi/official-site?${params.toString()}`
 }

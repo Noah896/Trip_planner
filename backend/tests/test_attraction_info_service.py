@@ -111,3 +111,61 @@ def test_official_site_route_redirects(monkeypatch):
     assert response.status_code == 307
     assert response.headers["location"] == "https://www.dpm.org.cn/"
     assert response.headers["x-attraction-info-source"] == "official"
+
+
+def test_official_site_route_uses_safe_in_app_fallback(monkeypatch):
+    class _InfoService:
+        def resolve(self, name: str, city: str):
+            return AttractionInfoLink(
+                url="https://www.so.com/s?q=fallback",
+                source="search",
+            )
+
+    monkeypatch.setattr(
+        poi_routes,
+        "get_attraction_info_service",
+        lambda: _InfoService(),
+    )
+    fallback = "/attraction-info?name=%E4%BA%94%E5%B2%AD%E9%98%81&city=%E9%83%B4%E5%B7%9E"
+
+    response = TestClient(app).get(
+        "/api/poi/official-site",
+        params={
+            "name": "五岭阁",
+            "city": "郴州",
+            "fallback": fallback,
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == fallback
+    assert response.headers["x-attraction-info-source"] == "search"
+
+
+def test_official_site_route_rejects_external_fallback(monkeypatch):
+    class _InfoService:
+        def resolve(self, name: str, city: str):
+            return AttractionInfoLink(
+                url="https://www.so.com/s?q=fallback",
+                source="search",
+            )
+
+    monkeypatch.setattr(
+        poi_routes,
+        "get_attraction_info_service",
+        lambda: _InfoService(),
+    )
+
+    response = TestClient(app).get(
+        "/api/poi/official-site",
+        params={
+            "name": "五岭阁",
+            "city": "郴州",
+            "fallback": "https://example.com/redirect",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://www.so.com/s?q=fallback"

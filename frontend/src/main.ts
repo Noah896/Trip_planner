@@ -8,6 +8,7 @@ import Result from './views/Result.vue'
 import Chat from './views/Chat.vue'
 import History from './views/History.vue'
 import Login from './views/Login.vue'
+import AttractionInfo from './views/AttractionInfo.vue'
 import { getStoredAuthUser, isAuthDisabled } from './services/auth'
 
 const router = createRouter({
@@ -28,6 +29,11 @@ const router = createRouter({
       path: '/result',
       name: 'Result',
       component: Result
+    },
+    {
+      path: '/attraction-info',
+      name: 'AttractionInfo',
+      component: AttractionInfo
     },
     {
       path: '/chat',
