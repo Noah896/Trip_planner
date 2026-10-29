@@ -1,0 +1,44 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      APP_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8000
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:8080}
+      AUTH_ALLOW_REGISTRATION: ${AUTH_ALLOW_REGISTRATION:-false}
+      AUTH_REGISTRATION_KEY: ${AUTH_REGISTRATION_KEY:-}
+      AMAP_MCP_COMMAND: uvx
+      AMAP_MCP_HOST: 127.0.0.1
+      AMAP_MCP_PORT: 8001
+      FORWARDED_ALLOW_IPS: "*"
+      HF_HOME: /models/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /models/sentence-transformers
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - trip_data:/app/data
+      - rag_models:/models
+    stop_grace_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ""
+        VITE_AMAP_WEB_JS_KEY: ${VITE_AMAP_WEB_JS_KEY:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:80"
+
+volumes:
+  trip_data:
+  rag_models:

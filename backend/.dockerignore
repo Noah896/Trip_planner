@@ -1,0 +1,10 @@
+.env
+.pytest_cache
+__pycache__
+*.py[cod]
+data
+evals/results
+models
+tests
+venv
+.venv

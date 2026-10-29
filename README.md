@@ -1,248 +1,212 @@
 # 智能旅行规划助手(trip_planner)
 
-输入城市、日期和偏好,自动检索真实的景点 / 天气 / 酒店数据,再由 AI 汇总成一份结构化的旅行计划(含每日行程、预算、地图和 PDF 导出)。
+一个可运行的全栈 AI 旅行规划应用。用户输入城市、日期和偏好，系统实时检索景点、天气、酒店和公共旅行知识，再通过一次结构化模型调用生成每日行程、预算、地图和可导出的计划。
 
-后端用 **FastAPI + LangChain + LangGraph**,前端用 **Vue 3 + Vite + Ant Design Vue**。
+后端采用 **FastAPI + LangChain + LangGraph**，前端采用 **Vue 3 + Vite + Ant Design Vue**。
 
----
+## 功能
 
-## 1. 它是怎么工作的
+- 表单规划与自然语言聊天两个入口，共用同一条检索、记忆和规划流水线。
+- SSE 实时推送检索和生成进度，避免几十秒等待期间没有反馈。
+- 省份+城市名称规范化、必去景点硬约束、亲子/步行场景的近郊过滤。
+- 高德 MCP 提供景点、天气和酒店实时数据；坐标与详情由服务层确定性回填。
+- BGE + FAISS + 中文 BM25 + RRF 混合知识检索，返回可核验来源并支持无答案拒答。
+- 账号注册/登录、Bearer 会话、登录限流、用户模型配额和账号生命周期管理。
+- 会话内改行程、长期偏好、历史行程浏览/详情/删除。
+- 模型异常、上游超时和 MCP 故障时返回明确的降级状态，不伪造成功结果。
+- 景点图片优先使用 Wikimedia Commons，网络失败时前端保留本地示意图。
 
-一次 `/api/trip/plan` 请求会在 LangGraph 里跑这么一张图:
+## 架构
 
+```text
+POST /api/trip/plan         表单直通，一次性返回完整结果
+POST /api/trip/plan/stream  表单直通，SSE 推送进度
+POST /api/chat/stream       聊天入口，先判意图/抽槽位，再复用规划流水线
+
+LangGraph
+  ├─ search_attractions ─┐
+  ├─ query_weather      ─┼─> generate_plan
+  ├─ search_hotels      ─┤
+  └─ search_knowledge   ─┘
+
+景点/天气/酒店: 高德 MCP，确定性调用，不消耗模型额度
+知识检索:      BGE + FAISS + BM25 + RRF，不消耗模型额度
+行程生成:      TripPlan 结构化输出，一次模型调用
+失败处理:      核心检索/规划失败 -> degraded；RAG 失败 -> knowledge_degraded
 ```
-START ─┬─> search_attractions ─┐
-       ├─> query_weather ──────┼─> generate_plan ─> END
-       └─> search_hotels ──────┘
-```
 
-- 前三个节点并行执行,都是**确定性**调用:直接调高德 MCP 工具 + 服务层解析,不经过模型(坐标来自 `maps_search_detail`,不是模型编的);
-- `generate_plan` 是**整条链路唯一的模型调用**:把三路结果汇总,用**结构化输出**直接产出 `TripPlan`(模型不支持时退回"纯文本 + JSON 解析");
-- 高德数据全部通过 MCP Server(`uvx amap-mcp-server`)获取,**不依赖模型记忆**;
-- `POST /api/trip/plan/stream` 会把每个节点的完成情况实时推给前端,前端据此显示真实进度。
+## 本地启动
 
-如果规划失败,后端**不会**假装成功:它仍会返回一份可渲染的占位行程,但会把 `degraded` 置为 `true`,前端顶部显示警示条。
-
----
-
-## 2. 环境要求
-
-| 依赖 | 版本 | 说明 |
-| --- | --- | --- |
-| Python | 3.11+(已在 3.13 上验证) | 后端运行环境 |
-| Node.js | 18+ | 前端构建与开发服务器 |
-| uv / uvx | 随 `requirements.txt` 一起安装 | 用于拉起高德 MCP Server,缺了就只能拿到降级结果 |
-| 高德地图 API Key | 必填 | [控制台申请](https://console.amap.com/dev/key/app) |
-| 模型 API Key | 必填 | 默认走 ModelScope 的 OpenAI 兼容接口 |
-
----
-
-## 3. 快速开始(五步)
+环境要求：Python 3.13、Node.js 22+、`uvx`、高德 API Key 和 OpenAI 兼容模型 API Key。
 
 ```powershell
-# 1. 进入项目
-cd trip_planner
-
-# 2. 建虚拟环境并安装后端依赖(已装好的话跳过)
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
-
-# 3. 准备配置:复制模板后填入真实密钥
-Copy-Item backend\.env.example  backend\.env
+Copy-Item backend\.env.example backend\.env
 Copy-Item frontend\.env.example frontend\.env
 
-# 4. 装前端依赖
-cd frontend; npm install; cd ..
+python -m pip install -r backend\requirements-dev.txt
+Set-Location frontend
+npm ci
+Set-Location ..
 
-# 5. 一键启动前后端
 powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
 ```
 
-启动后:
+本地地址：
 
-- 前端 <http://localhost:5173>
-- 后端接口文档 <http://localhost:8000/docs>
+- 前端：<http://localhost:5173>
+- 后端文档：<http://localhost:8000/docs>
 
-`scripts/dev.ps1` 会自动挑选可用的 Python(优先 `backend/venv`,其次仓库上一级的 `.venv`),前端 `node_modules` 缺失时自动 `npm install`,并在你按 Ctrl+C 时停掉子进程。
+前端默认使用同源 `/api`：开发环境由 Vite 代理到 `localhost:8000`，Docker 生产镜像由 Nginx 代理到后端容器。
 
-macOS / Linux 把第 5 步换成两句话即可:
+## Docker 部署
 
-```bash
-(cd backend && python run.py) &
-(cd frontend && npm run dev)
+### 1. 准备配置
+
+```powershell
+Copy-Item .env.compose.example .env
+Copy-Item backend\.env.example backend\.env
 ```
 
----
+必须填写：
 
-## 4. 配置说明
+- `backend/.env` 中的 `AMAP_API_KEY`
+- `backend/.env` 中的 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL_ID`
+- 根目录 `.env` 中的 `VITE_AMAP_WEB_JS_KEY`，必须使用高德 **Web 端 JS API Key**
 
-### `backend/.env`
+Compose 默认关闭公开注册。需要开放注册时，在根目录 `.env` 中设置 `AUTH_ALLOW_REGISTRATION=true`，同时配置高熵 `AUTH_REGISTRATION_KEY`。
 
-| 变量 | 必填 | 说明 |
-| --- | --- | --- |
-| `LLM_API_KEY` | 是 | 模型密钥;留空时回退读 `MODELSCOPE_API_KEY` |
-| `LLM_MODEL_ID` | 是 | 模型名,如 `Qwen/Qwen3.5-27B` |
-| `LLM_BASE_URL` | 是 | OpenAI 兼容的接口地址 |
-| `LLM_TIMEOUT` | 否 | 单次模型请求超时(秒),默认 60 |
-| `AMAP_API_KEY` | 是 | 高德 Key,**缺失会直接导致后端启动失败** |
-| `APP_ENV` | 否 | `development`(默认,开热重载)/ `production`(关热重载) |
-| `HOST` / `PORT` | 否 | 默认 `0.0.0.0:8000` |
-| `CORS_ORIGINS` | 否 | 允许的前端来源,逗号分隔 |
-| `LOG_LEVEL` | 否 | uvicorn 日志级别,默认 `INFO` |
-| `UNSPLASH_ACCESS_KEY` | 否 | 旧字段兼容保留;景点图片已改用 Wikimedia Commons |
-| `AMAP_MCP_COMMAND` / `AMAP_MCP_ARGS` | 否 | 自定义 MCP 启动命令,默认 `uvx amap-mcp-server` |
+### 2. 启动
 
-### `frontend/.env`
+```powershell
+docker compose up --build -d
+docker compose ps
+Invoke-RestMethod http://localhost:8080/health
+```
 
-| 变量 | 必填 | 说明 |
-| --- | --- | --- |
-| `VITE_API_BASE_URL` | 是 | 后端地址,默认 `http://localhost:8000` |
-| `VITE_AMAP_WEB_JS_KEY` | 是 | 高德 **Web端(JS API)** Key,用于渲染景点地图 |
+默认入口为 <http://localhost:8080>，后端 API 仅绑定到宿主机 `127.0.0.1:${BACKEND_PORT}`，不应直接暴露到公网。
 
-> `.env` 已被 `.gitignore` 忽略,仓库里只提交 `.env.example`。**不要**把真实密钥提交上去。
+首次启动可能需要下载 Python 依赖中的 embedding 模型以及 `uvx` 缓存的 MCP Server。开始规划前可先注册账号并完成一次健康检查。
 
----
+### 3. 数据持久化
 
-## 5. 接口一览
+Compose 使用两个命名卷：
 
-启动后可访问 <http://localhost:8000/docs> 自助调试。主要接口:
+- `trip_data`：SQLite 账号、会话、偏好、历史、配额和 FAISS 索引。
+- `rag_models`：HuggingFace / Sentence Transformers 模型缓存。
+
+更新镜像不会删除这两个卷。清理数据前必须先备份：
+
+```powershell
+docker run --rm -v trip_planner_trip_data:/data -v ${PWD}:/backup alpine `
+  tar czf /backup/trip_data_backup.tar.gz -C /data .
+```
+
+### 4. 查看日志与停止
+
+```powershell
+docker compose logs -f --tail=200 backend
+docker compose logs -f --tail=200 frontend
+docker compose down
+```
+
+`docker compose down -v` 会连同账号、历史和模型缓存一起删除，除测试环境外不要使用。
+
+### 5. 公网部署
+
+- 在 Compose 前增加 Caddy、Traefik 或云负载均衡，由它处理 HTTPS；不要把后端端口直接暴露到公网。
+- 将根目录 `.env` 的 `PUBLIC_ORIGIN` 改成实际 HTTPS 来源。
+- 生产环境关闭匿名注册，或配置邀请码；`AUTH_ADMIN_KEY` 至少使用 32 字符高熵随机值。
+- 当前未实现 Request ID/结构化日志和全局规划并发背压，公开 Demo 应设置平台级并发与费用告警。
+
+## 关键配置
+
+完整变量说明见 `backend/.env.example`。
+
+| 变量 | 作用 |
+| --- | --- |
+| `LLM_MODEL_ID` / `LLM_BASE_URL` / `LLM_API_KEY` | OpenAI 兼容模型配置 |
+| `AMAP_API_KEY` | 高德地图后端 Key |
+| `VITE_AMAP_WEB_JS_KEY` | 高德 Web 端 JS Key |
+| `AUTH_ENABLED` | 是否要求 Bearer token |
+| `AUTH_ALLOW_REGISTRATION` / `AUTH_REGISTRATION_KEY` | 注册开关与邀请码 |
+| `AUTH_ADMIN_KEY` | 账号管理接口密钥，生产环境至少 32 字符 |
+| `MODEL_QUOTA_DAILY_CALL_LIMIT` | 每用户每日模型调用单位上限 |
+| `RAG_ENABLED` / `RAG_AUTO_BOOTSTRAP` | 知识检索与索引自动构建 |
+| `MEMORY_DB_PATH` | 会话和长期偏好的 SQLite 路径 |
+
+## 主要接口
+
+启动后可访问后端直连的 <http://localhost:8000/docs>；`BACKEND_PORT` 改动时请同步替换端口。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 进程存活检查 |
-| GET | `/api/trip/health` | 规划服务运行时信息(模型、图状态)。**未配置 LLM Key 时返回 503** |
-| POST | `/api/trip/plan` | 生成旅行计划(整条链路跑完再返回) |
-| POST | `/api/trip/plan/stream` | 同上,但用 **SSE 实时推进度**(每完成一步推一条),前端据此显示真实进度 |
-| GET | `/api/map/poi` | POI 搜索 |
-| GET | `/api/map/weather` | 天气查询 |
-| POST | `/api/map/route` | 路线规划 |
-| GET | `/api/map/health` | 高德 Key 是否配置 |
-| GET | `/api/poi/detail/{poi_id}` | POI 详情 |
-| GET | `/api/poi/photo` | 景点配图(Wikimedia Commons,失败时前端显示本地示意图) |
+| POST | `/api/auth/register` | 注册并获取 Bearer token |
+| POST | `/api/auth/login` | 登录 |
+| POST | `/api/trip/plan` | 非流式生成旅行计划 |
+| POST | `/api/trip/plan/stream` | SSE 流式生成旅行计划 |
+| POST | `/api/chat/stream` | 聊天式规划 |
+| GET | `/api/history` | 当前用户历史行程 |
+| GET/DELETE | `/api/memory/...` | 长期偏好读取与删除 |
+| GET | `/api/poi/photo` | Wikimedia 景点图片 |
 
-### 生成一份计划
+业务接口默认需要：
 
-```bash
-curl -X POST http://localhost:8000/api/trip/plan \
-  -H "Content-Type: application/json" \
-  -d '{
-    "city": "北京",
-    "start_date": "2025-06-01",
-    "end_date": "2025-06-03",
-    "travel_days": 3,
-    "transportation": "公共交通",
-    "accommodation": "经济型酒店",
-    "preferences": ["历史文化", "美食"],
-    "free_text_input": "希望多安排一些博物馆"
-  }'
+```http
+Authorization: Bearer <token>
 ```
 
-注意 `travel_days` 必须等于 `end_date - start_date + 1`,否则直接返回 `422`。
+## 测试与 CI
 
-响应(截断):
-
-```json
-{
-  "success": true,
-  "degraded": false,
-  "message": "旅行计划生成成功",
-  "data": {
-    "city": "北京",
-    "start_date": "2025-06-01",
-    "end_date": "2025-06-03",
-    "days": [{ "date": "2025-06-01", "day_index": 0, "attractions": [], "meals": [] }],
-    "weather_info": [],
-    "overall_suggestions": "...",
-    "budget": { "total": 2060 }
-  }
-}
-```
-
-### `degraded` 是什么
-
-| 字段 | 含义 |
-| --- | --- |
-| `degraded: false` | 真实规划结果 |
-| `degraded: true` | AI 规划失败,`data` 是占位行程(景点名形如"北京景点1"),仅供前端渲染结构,**不要直接使用** |
-
-此时 `message` 会说明原因,前端首页弹警告、结果页顶部显示警示条。
-
----
-
-## 6. 测试
-
-后端(纯离线,不需要 API Key,不会发起网络请求):
+后端离线测试不调用模型、不需要 API Key：
 
 ```powershell
-cd backend
-..\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-..\.venv\Scripts\python.exe -m pytest
+Set-Location backend
+python -X utf8 -m pytest -q
 ```
 
-上面假设虚拟环境建在 `trip_planner\.venv`;若建在仓库上一级,把 `..\.venv` 换成 `..\..\.venv`。也可以直接 `cd backend` 后运行 `pytest`(已装进环境的话)。
+前端类型检查与构建：
 
-覆盖范围:JSON/MCP 返回值解析、高德 POI/天气/路线解析、`/plan` 与 `/health` 的 HTTP 契约与请求校验、降级标记逻辑。
-
-前端(类型检查 + 构建,当 CI 最低门槛):
-
-```bash
-cd frontend && npm run build
+```powershell
+Set-Location frontend
+npm run build
 ```
 
----
+RAG 离线检索评测：
 
-## 7. 常见问题
-
-**启动报 "配置错误: AMAP_API_KEY未配置"**
-后端启动时会校验配置,请先在 `backend/.env` 里填高德 Key。
-
-**`/api/trip/health` 返回 503**
-说明 LLM 密钥没配好,检查 `LLM_API_KEY`(或 `MODELSCOPE_API_KEY`)。
-
-**第一次生成计划特别慢(几十秒到两分钟)**
-首次请求要现场拉起 MCP 子进程并编译 LangGraph,期间要跑 4 次模型调用和多次高德工具调用。前端超时是 120 秒。后续请求会复用已编译的图,快一些。
-
-**返回的行程里景点叫"北京景点1"**
-这是 `degraded=true` 的占位结果。常见原因:高德 Key 无效/额度用尽、ModelScope 限流、`uvx` 不可用。请查看后端控制台日志里的 `⚠️ 使用兜底占位行程(...)` 一行确认原因。
-
-**`uvx` 找不到**
-执行 `pip install -r backend/requirements.txt` 会一并安装 `uv`;确认 `<venv>\Scripts\uvx.exe` 存在,或设置 `AMAP_MCP_COMMAND` 指定完整路径。
-
-**前端地图空白**
-`frontend/.env` 里的 `VITE_AMAP_WEB_JS_KEY` 必须是**Web端(JS API)**类型的 Key,与后端那个 Key 不是一回事。
-
-**端口被占用**
-后端默认 8000、前端 5173、常驻的高德 MCP Server 默认 8001。改 `backend/.env` 的 `PORT`,前端改 `vite.config.ts` 的 `server.port` 与代理目标。
-
----
-
-## 8. 目录结构
-
+```powershell
+Set-Location backend
+python -X utf8 scripts\eval_rag.py
 ```
+
+当前自建评测集包含 38 题，用于回归而非行业基准。规划质量评测见 `backend/evals/README.md`；真实 live 评测会消耗模型额度，必须显式确认。
+
+GitHub Actions 位于 `.github/workflows/ci.yml`，在 push 和 pull request 时执行后端测试、前端构建和 Compose 配置校验。
+
+## 目录结构
+
+```text
 trip_planner/
 ├─ backend/
-│  ├─ app/
-│  │  ├─ agents/trip_planner_agent.py   # LangGraph 多智能体编排(核心)
-│  │  ├─ api/main.py                    # FastAPI 应用与 lifespan
-│  │  ├─ api/routes/                    # trip / map / poi 路由
-│  │  ├─ services/                      # LLM、高德 MCP、Wikimedia 图片
-│  │  ├─ models/schemas.py              # Pydantic 请求/响应模型
-│  │  ├─ utils/json_utils.py            # LLM / MCP 返回值解析
-│  │  └─ config.py                      # 配置与环境变量
-│  ├─ tests/                            # pytest(离线可跑)
-│  ├─ requirements.txt                  # 已锁定版本
-│  ├─ run.py                            # 开发启动入口
-│  └─ AGENTS.md                         # 工作交接文档(每次开工前先读)
-├─ frontend/                            # Vue 3 + Vite
-├─ README.md                            # 本文件
-└─ scripts/dev.ps1                      # 一键启动前后端
+│  ├─ app/agents/              LangGraph 编排与结构化规划
+│  ├─ app/api/routes/          鉴权、行程、聊天、历史、记忆和图片接口
+│  ├─ app/rag/                 BGE + FAISS + BM25 + RRF
+│  ├─ app/services/            高德 MCP、记忆、配额、图片等业务服务
+│  ├─ tests/                   离线测试
+│  └─ Dockerfile
+├─ frontend/
+│  ├─ src/                     Vue 页面、组件和服务
+│  ├─ Dockerfile
+│  └─ nginx.conf
+├─ .github/workflows/ci.yml
+├─ docker-compose.yml
+└─ .env.compose.example
 ```
 
----
+## 已知限制
 
-## 9. 已知限制
-
-- 生产部署(容器化、限流、鉴权、结构化日志)尚未完成,待办清单见 `backend/AGENTS.md` 第 5 节。
-- 一次 `/plan` 只剩 1 次模型调用,但这一次单调用就要 20~30 秒(模型侧延迟),整体仍在 40~60 秒。`/api/trip/plan/stream` 会实时推进度、用户不再干等,但总时长本身要靠结果缓存才压得下去(见 `backend/AGENTS.md` 第 5 节)。
-- 没有多轮对话与长期偏好记忆;每次请求都是独立规划。
-- 高德 MCP Server 已改为常驻 streamable-http(不再每次调用起进程);当前为单实例,高并发前应先压测。
+- 规划仍依赖一次耗时约 20~30 秒的模型调用，端到端通常需要 40~60 秒；SSE 改善的是等待体验，不缩短模型生成时间。
+- 公共知识库当前是精选种子数据，需要按真实业务需求持续补充人工核验资料，并在资料或 embedding 变化后重跑检索评测。
+- 尚未实现 Request ID、结构化日志、外部追踪和全局规划并发背压；公开部署前应在反向代理或平台层增加限流和费用告警。
+- SQLite 适合单实例自托管和作品演示；多实例部署前需要迁移到共享数据库，并重新设计会话、配额和索引存储。
+- 项目没有多实例高可用与负载测试数据，不应宣称已经达到生产级高并发能力。

@@ -1,7 +1,7 @@
 # AGENTS.md — 智能旅行规划助手(trip_planner)工作交接
 
 > **每次开始工作前先读这个文件**;每次有实质进展后,更新第 4 节「进度日志」与第 5 节「下一步」。
-> 最近更新:2026-10-27
+> 最近更新:2026-10-29
 
 ---
 
@@ -183,6 +183,40 @@ POST /api/chat/stream        → 聊天:先判意图/抽槽位,够了再进同�
 ---
 
 ## 4. 进度日志
+
+### 2026-10-29(README 对齐 + Docker/Compose + GitHub Actions)
+
+补齐项目对外展示与可部署性,没有修改旅行检索、规划、记忆或鉴权业务逻辑。
+
+**README:**
+
+1. 删除“没有鉴权 / 没有多轮记忆 / 三次模型调用 / 三路检索”等过时描述;
+2. 按当前实现更新四路并行检索、单次结构化生成、账号与配额、记忆、历史、
+   RAG、SSE、降级和评测说明;
+3. 增加本地启动、Docker 部署、数据持久化、公网安全边界和已知限制。
+
+**部署配置:**
+
+1. 新增 `backend/Dockerfile`、`frontend/Dockerfile` 和 `frontend/nginx.conf`;
+2. 前端默认使用同源 API:开发时由 Vite 代理 `/api`、`/health`,生产时由
+   Nginx 转发到后端;SSE 关闭代理缓冲并将读写超时提高到 300 秒;
+3. 新增根目录 `docker-compose.yml`、`.env.compose.example` 和
+   `DEPLOYMENT.md`;Compose 默认以 production 模式运行,并默认关闭匿名注册;
+4. SQLite 与 FAISS 索引使用 `trip_data` 卷,HuggingFace/embedding 缓存使用
+   `rag_models` 卷;后端端口默认只绑定宿主机 `127.0.0.1`;
+5. 新增 `.github/workflows/ci.yml`,在 push / PR 时运行后端测试、前端构建和
+   Compose 配置校验。
+
+**验证:**
+
+1. 后端全量离线测试通过,记录为 **309 passed / 1 skipped**;
+2. `npm run build` 通过(3499 modules,Vite 提示主 chunk 约 2.2MB,属现有前端
+   体积优化事项,不影响构建);
+3. `docker-compose config --quiet` 和 Python YAML 解析通过;
+4. 本机 Docker daemon 未启动,因此本轮**没有实际 `docker build` 或容器启动验证**。
+
+**下一步:** 回到运行可靠性主线,优先做 Request ID + 结构化日志,再做结构化
+日志可观测的全局规划并发背压。
 
 ### 2026-10-27(景点图片:Wikimedia 真实图片 + 本地即时兜底)
 
@@ -1420,8 +1454,9 @@ LLM 返回的那些行程数据(天气 / 景点 / 酒店 / 预算…)渲染成�
 > `MRR@5=1.0000`、无答案误命中 `0/16`、城市串库 `0`、P95 约 14~19ms。
 > 中文 BM25 已改字符二元组,并加入 BGE + BM25 双门槛。阈值是当前 11 个知识卡
 > 的校准值;**扩资料或换 embedding 后必须先重跑 `scripts/eval_rag.py`**。
-> 下一步不继续扩城市或知识卡,转向结构化日志、request id、全局并发背压等
-> 运行可靠性工作;缓存、Qdrant、reranker 和聊天知识问答继续延后。
+> **2026-10-29 更新:**README、Docker/Compose、部署说明和 GitHub Actions CI
+> 已完成。下一步不继续扩城市或知识卡,优先补 Request ID + 结构化日志,再做
+> 全局规划并发背压;缓存、Qdrant、reranker 和聊天知识问答继续延后。
 
 > **2026-10-20 RAG 进展**：公共旅行知识 RAG 已按 C8 重做。
 > 核心位于 `app/rag/` 独立子包：`BAAI/bge-small-zh-v1.5` + FAISS +

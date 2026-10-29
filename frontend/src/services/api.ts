@@ -14,7 +14,8 @@ import type {
 } from '@/types'
 import { clearAuthSession, getAuthToken } from '@/services/auth'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+// 默认使用同源地址：开发环境由 Vite 代理，生产环境由 Nginx 反向代理。
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
